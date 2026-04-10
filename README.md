@@ -1,111 +1,105 @@
-# 🌡️ Heatwave AI — Backend
+# ระบบพยากรณ์คลื่นความร้อนเชิงพื้นที่ (Thailand Heatwave Forecasting) 🌡️🇹🇭
 
-A physics-informed deep learning backend for heatwave prediction over Thailand, powered by **ConvLSTM** and **ERA5 reanalysis data**.
+ระบบนี้เป็น Backend สำหรับพยากรณ์อุณหภูมิและคลื่นความร้อนในประเทศไทย โดยใช้โมเดล Deep Learning ชนิด **ConvLSTM** ร่วมกับข้อมูลอุตุนิยมวิทยา **ERA5** 
 
-## Overview
+## ✨ จุดเด่นของระบบ
+- **Spatial Awareness**: โมเดลรับรู้ความแตกต่างของพื้นที่ (เช่น ภาคเหนือที่เป็นภูเขา vs ภาคกลางที่เป็นที่ราบ) ผ่านการป้อนข้อมูลพิกัด (Lat/Lon) และระดับความสูง (Elevation) เป็นช่องสัญญาณเสริม
+- **Physics-Informed**: มีการคำนวณ Loss Function โดยอิงหลักฟิสิกส์บรรยากาศ (Adiabatic process) เพื่อให้ผลการพยากรณ์มีความสมจริงตามหลักอุตุนิยมวิทยา
+- **Multi-Channel Data**: ใช้ข้อมูลจาก ERA5 ทั้ง Geopotential Height ($Z_{500}$), อุณหภูมิที่ 2 เมตร ($T_{2m}$), และความชื้นในดิน (Soil Moisture)
 
-This project trains a spatiotemporal deep learning model to forecast heatwave events across Thailand using meteorological variables from the [ERA5 reanalysis dataset](https://cds.climate.copernicus.eu/). It serves predictions through a Flask REST API consumed by the [Heatwave Webapp](../Heatwave-Webapp/my-app/) frontend.
-
-## Architecture
+## 📁 โครงสร้างโปรเจกต์
 
 ```
-ERA5 Data (NetCDF)  →  Data Loader  →  ConvLSTM Model  →  Flask API  →  Frontend App
+├── src/                        # Package หลัก
+│   ├── api/                    # FastAPI server (เวอร์ชันใหม่)
+│   ├── cli/                    # Command-line interface
+│   ├── core/                   # Config, logger, utils
+│   ├── data/loader.py          # ✅ ERA5 data loading & preprocessing
+│   └── models/
+│       ├── convlstm.py         # ✅ HeatwaveConvLSTM + PhysicsInformedLoss
+│       └── manager.py          # ✅ ModelManager (load/predict)
+├── tests/                      # 🧪 Test suite (pytest)
+│   ├── conftest.py             # Shared fixtures
+│   ├── test_model.py           # Unit tests: ConvLSTM, PhysicsInformedLoss
+│   ├── test_data_loader.py     # Unit tests: data utilities
+│   └── test_model_manager.py   # Unit tests: ModelManager
+├── config/config.yaml          # Configuration
+├── era5_data/                  # ERA5 NetCDF inputs
+├── models/                     # Model checkpoints (.pth)
+├── output/                     # Generated artifacts
+├── logs/                       # Log files
+├── api_server.py               # Flask API entrypoint (Production)
+├── Train_Ai.py                 # Training script
+├── evaluate_model.py           # 🔍 Model evaluation CLI
+├── heatwave_cli.py             # Interactive CLI
+└── download_era5.py            # ERA5 downloader
 ```
 
-### Key Components
+## 🚀 วิธีการเริ่มต้นใช้งาน
 
-| File | Description |
-|---|---|
-| `download_era5.py` | Downloads ERA5 surface & upper-air data (2000–2023) for the Thailand region via the CDS API |
-| `data_loader.py` | Loads, crops, merges, and normalizes ERA5 `.nc` files into model-ready tensors `(Time, Channels, H, W)` |
-| `heatwave_model.py` | Defines the **Encoder-Decoder ConvLSTM** model and the **Physics-Informed Loss** function |
-| `Train_Ai.py` | Training pipeline with train/val split, versioned checkpoint saving |
-| `api_server.py` | Flask REST API serving predictions, forecasts, and GeoJSON map data |
-| `main.py` | Entry point / orchestration script |
-
-### Model Details
-
-- **Architecture**: Encoder-Decoder ConvLSTM (2 layers, 16 hidden channels)
-- **Input**: 5-day sequences of 3 channels — **Z500** (Geopotential), **T2m** (2m Temperature), **Soil Moisture**
-- **Output**: 2-day ahead temperature forecast grids
-- **Loss**: MSE + Physics constraint (Adiabatic Compression/Expansion penalty)
-- **Region**: Thailand (Lat 5°–21°N, Lon 97°–106°E)
-
-## Getting Started
-
-### Prerequisites
-
-- Python 3.9+
-- CUDA-capable GPU (recommended, not required)
-- [CDS API key](https://cds.climate.copernicus.eu/) for data download
-
-### Installation
-
+### 1. ติดตั้ง Library ที่จำเป็น
 ```bash
-# Create and activate virtual environment
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # Linux/macOS
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 1. Download ERA5 Data
-
-> **Note:** Requires a CDS API key configured in `~/.cdsapirc`.
-
+### 2. เตรียมข้อมูล
+ดาวน์โหลดข้อมูล ERA5 มาไว้ที่โฟลเดอร์ `era5_data/` หรือใช้สคริปต์:
 ```bash
 python download_era5.py
 ```
 
-Data will be saved to the `era5_data/` directory as NetCDF files.
-
-### 2. Train the Model
-
+### 3. การเทรนโมเดล (Training)
 ```bash
 python Train_Ai.py
 ```
+*ระบบจะสร้างไฟล์โมเดลไว้ใน `models/heatwave_model_checkpoint_v{N}.pth`*
 
-Checkpoints are saved to `models/` with automatic versioning (e.g., `heatwave_model_checkpoint_v1.pth`).
-
-### 3. Start the API Server
-
+### 4. รันเซิร์ฟเวอร์ API
 ```bash
 python api_server.py
 ```
 
-The server starts on `http://localhost:5000`.
+### 5. 🔍 ทดสอบ/ประเมินผลโมเดล (Model Evaluation)
 
-## API Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/health` | Health check for frontend connectivity |
-| `GET` | `/predict/summary` | Dashboard summary statistics |
-| `GET` | `/predict/map` | GeoJSON heatmap features for the map layer |
-| `GET` | `/forecast/summary` | Multi-day forecast data |
-
-## Project Structure
-
-```
-NewHeart/
-├── api_server.py          # Flask REST API
-├── data_loader.py         # ERA5 data loading & preprocessing
-├── download_era5.py       # ERA5 data downloader (CDS API)
-├── heatwave_model.py      # ConvLSTM model & physics loss
-├── Train_Ai.py            # Training pipeline
-├── main.py                # Entry point
-├── requirements.txt       # Python dependencies
-├── era5_data/             # Downloaded ERA5 NetCDF files
-├── models/                # Saved model checkpoints
-└── output/                # Prediction outputs
+**รัน unit tests ทั้งหมด:**
+```bash
+pytest
 ```
 
-## Tech Stack
+**ประเมินโมเดลบน test set พร้อมดู metrics:**
+```bash
+# ใช้ checkpoint ล่าสุดอัตโนมัติ
+python evaluate_model.py
 
-- **PyTorch** — Model definition & training
-- **xarray / NetCDF4** — Climate data I/O
-- **Flask + Flask-CORS** — REST API
-- **NumPy** — Numerical computation
-- **CDS API** — ERA5 data retrieval
+# ระบุ checkpoint เอง
+python evaluate_model.py --checkpoint models/heatwave_convlstm_v3.pth
+
+# บันทึกผลลัพธ์เป็น JSON
+python evaluate_model.py --output-json output/eval_results.json
+
+# ดู progress ระหว่าง evaluate
+python evaluate_model.py --verbose
+```
+
+**Metrics ที่แสดง:**
+| Metric | คำอธิบาย |
+|--------|----------|
+| MAE / RMSE (°C) | ความผิดพลาดของการพยากรณ์อุณหภูมิ |
+| R² | ความแม่นยำโดยรวมของโมเดล |
+| Heatwave Precision/Recall/F1 | ความสามารถตรวจจับคลื่นความร้อน (≥35°C) |
+| MSE Loss / Physics Loss | ค่า Loss จาก training objective |
+| Inference time | ความเร็วในการพยากรณ์ (ms/sample) |
+
+## 📡 API Endpoints ที่สำคัญ
+- `POST /api/predict`: พยากรณ์อุณหภูมิล่วงหน้าจากข้อมูลล่าสุด
+- `GET /api/map`: ดึงข้อมูลพยากรณ์ในรูปแบบ GeoJSON สำหรับแสดงผลบนแผนที่
+- `GET /api/health`: ตรวจสอบสถานะของระบบและเวอร์ชันโมเดลที่ใช้งาน
+
+## 🛠️ รายละเอียดทางเทคนิค (สำหรับนักพัฒนา)
+เพื่อให้โมเดลแยกแยะพื้นที่ได้ ระบบมีการทำ **Coordinate Encoding**:
+- **Channel 0-2**: ข้อมูลอากาศ ($Z, T_{2m}, SWVL1$)
+- **Channel 3**: ระดับความสูง (Elevation) เพื่อแยกแยะพื้นที่ภูเขา
+- **Channel 4-5**: พิกัดรุ้งและแวง (Latitude, Longitude) เพื่อระบุตำแหน่งเชิงภูมิศาสตร์
+
+---
+พัฒนาโดยใช้ Python, PyTorch และ Xarray
