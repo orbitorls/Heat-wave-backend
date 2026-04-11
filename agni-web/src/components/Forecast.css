@@ -1,0 +1,587 @@
+/* Forecast.css */
+.forecast-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  padding: var(--space-6);
+  background-color: var(--bg-base);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border-subtle);
+  font-family: var(--font-sans);
+}
+
+.forecast-container.empty {
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+.forecast-empty-text {
+  font-size: var(--text-lg);
+  color: var(--text-tertiary);
+}
+
+.forecast-header-section {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.forecast-header-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.forecast-region-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 220px;
+}
+
+.forecast-region-label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary);
+  font-weight: 600;
+}
+
+.forecast-region-select {
+  height: 40px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border-radius: var(--radius-lg);
+  padding: 0 var(--space-3);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  outline: none;
+}
+
+.forecast-region-select:hover,
+.forecast-region-select:focus {
+  border-color: var(--border-focus);
+}
+
+.forecast-title {
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+  line-height: 1.2;
+}
+
+.forecast-subtitle {
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* Insights */
+.forecast-insights {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.insight-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-xs);
+}
+
+.insight-icon-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-base);
+  color: var(--text-secondary);
+}
+
+.insight-icon-wrapper.highlight {
+  color: var(--heat-danger);
+  background-color: var(--heat-danger-bg);
+}
+
+.insight-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.insight-label {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.insight-value {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.forecast-content {
+  width: 100%;
+  overflow: hidden;
+}
+
+.forecast-scroll-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.forecast-scroll-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 10;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: var(--shadow-md);
+}
+
+.forecast-scroll-btn:hover {
+  background-color: var(--bg-base);
+  border-color: var(--border-focus);
+  transform: translateY(-50%) scale(1.05);
+}
+
+.forecast-scroll-btn--left {
+  left: -4px;
+}
+
+.forecast-scroll-btn--right {
+  right: -4px;
+}
+
+.forecast-scroll-hint {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: var(--space-2) 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 500;
+  gap: var(--space-2);
+}
+
+.forecast-grid {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 8px 4px 24px 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-subtle) transparent;
+}
+
+.forecast-grid::-webkit-scrollbar {
+  height: 6px;
+}
+
+.forecast-grid::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.forecast-grid::-webkit-scrollbar-thumb {
+  background-color: var(--border-subtle);
+  border-radius: 3px;
+}
+
+/* CARDS */
+.forecast-card {
+  flex: 0 0 auto;
+  width: 130px;
+  min-width: 130px;
+  max-width: 130px;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 12px 10px;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.forecast-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.forecast-card--today {
+  width: 140px;
+  min-width: 140px;
+  max-width: 140px;
+  box-shadow: var(--shadow-md);
+  border-width: 2px;
+}
+
+.forecast-card--today:hover {
+  box-shadow: var(--shadow-float);
+}
+
+.fc-today-badge {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  background-color: var(--card-color);
+  color: var(--bg-base);
+  font-size: 9px;
+  font-weight: 700;
+  text-align: center;
+  padding: 3px 0;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* HEAD */
+.fc-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin-top: 20px;
+}
+
+.fc-day-label {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--card-text);
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.forecast-card--today .fc-day-label {
+  font-size: 15px;
+}
+
+.fc-date-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+/* TEMP */
+.fc-temp-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 8px 0 6px 0;
+}
+
+.fc-temp {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--card-text);
+  text-align: center;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.forecast-card--today .fc-temp {
+  font-size: 26px;
+}
+
+/* TREND */
+.fc-trend {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 20px;
+  margin-top: 2px;
+}
+
+.trend-indicator {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 12px;
+  background-color: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.trend-up {
+  color: var(--heat-danger-text);
+  border-color: var(--heat-danger-border);
+}
+
+.trend-down {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.trend-placeholder {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  opacity: 0.5;
+}
+
+/* CHART (vertical bar) */
+.fc-chart {
+  display: flex;
+  justify-content: center;
+  height: 40px;
+  margin: 6px 0;
+}
+
+.fc-chart-track {
+  width: 10px;
+  background-color: var(--bg-base);
+  border-radius: 5px;
+  position: relative;
+  border: 1px solid var(--card-border);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
+.fc-chart-fill {
+  width: 100%;
+  background-color: var(--card-color);
+  border-radius: 5px;
+}
+
+/* RISK BADGE */
+.fc-risk-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--card-color);
+  color: var(--bg-base);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 10px;
+  margin: 0 auto 8px;
+  min-width: 55px;
+  max-width: 85%;
+  text-align: center;
+  box-shadow: var(--shadow-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* PROBABILITY */
+.fc-probability {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: auto;
+  width: 100%;
+}
+
+.fc-prob-label {
+  font-size: 9px;
+  color: var(--text-secondary);
+  text-align: center;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fc-prob-track {
+  height: 3px;
+  background-color: var(--border-subtle);
+  border-radius: 2px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.fc-prob-fill {
+  height: 100%;
+  background-color: var(--card-color);
+  border-radius: 2px;
+}
+
+@media (max-width: 900px) {
+  .forecast-card {
+    width: 120px;
+    min-width: 120px;
+    max-width: 120px;
+  }
+  
+  .forecast-card--today {
+    width: 130px;
+    min-width: 130px;
+    max-width: 130px;
+  }
+  
+  .fc-temp {
+    font-size: 20px;
+  }
+  
+  .forecast-card--today .fc-temp {
+    font-size: 24px;
+  }
+}
+
+@media (max-width: 768px) {
+  .forecast-region-picker {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .forecast-region-select {
+    width: 100%;
+  }
+  
+  .forecast-card {
+    width: 105px;
+    min-width: 105px;
+    max-width: 105px;
+    padding: 10px 8px;
+  }
+  
+  .forecast-card--today {
+    width: 115px;
+    min-width: 115px;
+    max-width: 115px;
+  }
+  
+  .fc-head {
+    margin-top: 18px;
+  }
+  
+  .fc-day-label {
+    font-size: 12px;
+  }
+  
+  .fc-date-label {
+    font-size: 10px;
+  }
+  
+  .fc-temp {
+    font-size: 18px;
+  }
+  
+  .forecast-card--today .fc-temp {
+    font-size: 22px;
+  }
+  
+  .fc-trend {
+    min-height: 16px;
+  }
+  
+  .trend-indicator {
+    font-size: 9px;
+    padding: 1px 4px;
+  }
+  
+  .fc-chart {
+    height: 30px;
+  }
+  
+  .fc-risk-badge {
+    font-size: 9px;
+    padding: 2px 6px;
+    min-width: 50px;
+  }
+  
+  .fc-prob-label {
+    font-size: 8px;
+  }
+}
+
+@media (max-width: 480px) {
+  .forecast-container {
+    padding: var(--space-4);
+  }
+  
+  .forecast-card {
+    width: 90px;
+    min-width: 90px;
+    max-width: 90px;
+    padding: 8px 6px;
+  }
+  
+  .forecast-card--today {
+    width: 100px;
+    min-width: 100px;
+    max-width: 100px;
+  }
+  
+  .fc-today-badge {
+    font-size: 8px;
+  }
+  
+  .fc-head {
+    margin-top: 16px;
+    gap: 1px;
+  }
+  
+  .fc-day-label {
+    font-size: 10px;
+  }
+  
+  .fc-date-label {
+    font-size: 9px;
+  }
+  
+  .fc-temp {
+    font-size: 16px;
+  }
+  
+  .forecast-card--today .fc-temp {
+    font-size: 18px;
+  }
+  
+  .fc-chart {
+    height: 24px;
+  }
+  
+  .fc-chart-track {
+    width: 8px;
+  }
+  
+  .fc-risk-badge {
+    font-size: 8px;
+    padding: 2px 5px;
+    min-width: 45px;
+  }
+  
+  .fc-prob-label {
+    font-size: 7px;
+  }
+}
