@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Heatwave AI - Master Control</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono&display=swap');
+        :root { --primary: #6366f1; --surface: #ffffff; --bg: #f8fafc; --text: #1e293b; }
+        body { font-family: 'Outfit', sans-serif; background-color: var(--bg); color: var(--text); }
+        .soft-card { background: var(--surface); border-radius: 28px; border: 1px solid rgba(226, 232, 240, 0.8); box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.04); }
+        .input-elegant { background: #f1f5f9; border: 2px solid transparent; border-radius: 12px; padding: 0.6rem 1rem; transition: all 0.2s; font-weight: 600; font-size: 0.85rem; width: 100%; }
+        .input-elegant:focus { background: #fff; border-color: var(--primary); outline: none; }
+        .label-cap { font-size: 0.65rem; font-weight: 800; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; display: block; }
+        .nav-btn { padding: 0.75rem 1.5rem; border-radius: 16px; font-weight: 700; color: #64748b; transition: 0.3s; }
+        .nav-btn.active { background: #fff; color: var(--primary); box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        #map { height: 500px; border-radius: 28px; }
+        .config-group { background: #fdfdfd; padding: 1.5rem; border-radius: 20px; border: 1px solid #f1f5f9; }
+    </style>
+</head>
+<body class="antialiased">
+
+    <!-- Header -->
+    <header class="max-w-[1600px] mx-auto px-8 pt-8 pb-4">
+        <div class="flex justify-between items-center bg-white/80 p-3 rounded-3xl backdrop-blur-xl border border-slate-200/50 shadow-sm">
+            <div class="flex items-center space-x-4 pl-4">
+                <div class="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white text-2xl shadow-xl shadow-indigo-500/20">🛰️</div>
+                <div>
+                    <h1 class="font-extrabold text-xl tracking-tight">AI Orchestrator <span class="text-indigo-600">v3.0</span></h1>
+                    <div id="conn-status" class="flex items-center space-x-1.5"><div class="w-1.5 h-1.5 rounded-full bg-red-500"></div><span class="text-[10px] font-black text-slate-400 uppercase tracking-widest">Idle</span></div>
+                </div>
+            </div>
+            <nav class="flex space-x-2">
+                <button onclick="switchTab('trainer')" id="btn-trainer" class="nav-btn active">Training Center</button>
+                <button onclick="switchTab('predictor')" id="btn-predictor" class="nav-btn">Live Predictor</button>
+                <button onclick="switchTab('hub')" id="btn-hub" class="nav-btn">Model Hub</button>
+            </nav>
+        </div>
+    </header>
+
+    <main class="max-w-[1600px] mx-auto p-8">
+        
+        <!-- SECTION: TRAINER -->
+        <div id="section-trainer" class="grid grid-cols-1 xl:grid-cols-12 gap-8">
+            
+            <!-- LEFT: ALL CONFIGURATIONS (5 columns) -->
+            <div class="xl:col-span-5 space-y-6 overflow-y-auto max-h-[85vh] pr-2 custom-scrollbar">
+                <div class="soft-card p-10">
+                    <h3 class="font-black text-2xl mb-8 flex items-center text-slate-800">
+                        <span class="w-2 h-8 bg-indigo-600 rounded-full mr-4"></span>
+                        Model Parameters
+                    </h3>
+
+                    <div class="space-y-8">
+                        <!-- 1. Backend Selection -->
+                        <div class="config-group">
+                            <label class="label-cap">Learning Engine</label>
+                            <select id="cfg-backend" onchange="toggleBackendUI()" class="input-elegant text-indigo-600 text-lg">
+                                <option value="xgboost">XGBoost High-Performance</option>
+                                <option value="balanced_rf">Balanced Random Forest</option>
+                            </select>
+                        </div>
+
+                        <!-- 2. Core Hyperparameters -->
+                        <div class="grid grid-cols-2 gap-6">
+                            <div class="config-group">
+                                <label class="label-cap text-indigo-500">Architecture</label>
+                                <div class="space-y-4">
+                                    <div><label class="label-cap">Estimators</label><input type="number" id="cfg-estimators" value="300" class="input-elegant"></div>
+                                    <div><label class="label-cap">Max Depth</label><input type="number" id="cfg-depth" value="20" class="input-elegant"></div>
+                                    <div><label class="label-cap">Learning Rate</label><input type="number" id="cfg-lr" value="0.001" step="0.0001" class="input-elegant"></div>
+                                </div>
+                            </div>
+                            <div class="config-group">
+                                <label class="label-cap text-green-500">Data Window</label>
+                                <div class="space-y-4">
+                                    <div><label class="label-cap">Seq Len (Days)</label><input type="number" id="cfg-seq-len" value="7" class="input-elegant"></div>
+                                    <div><label class="label-cap">Future Seq</label><input type="number" id="cfg-future-seq" value="2" class="input-elegant"></div>
+                                    <div><label class="label-cap">Train Ratio</label><input type="number" id="cfg-split" value="0.7" step="0.05" class="input-elegant"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 3. Advanced Backend Specifics -->
+                        <div id="ui-xgb" class="config-group border-orange-100">
+                            <label class="label-cap text-orange-500">XGBoost Advanced</label>
+                            <div class="grid grid-cols-2 gap-4 mt-4">
+                                <div><label class="label-cap">Subsample</label><input type="number" id="cfg-subsample" value="0.9" step="0.1" class="input-elegant"></div>
+                                <div><label class="label-cap">Colsample</label><input type="number" id="cfg-colsample" value="0.9" step="0.1" class="input-elegant"></div>
+                                <div class="col-span-2">
+                                    <label class="label-cap">Hardware Accelerator</label>
+                                    <select id="cfg-tree-method" class="input-elegant">
+                                        <option value="hist">Auto-Histogram (Fast)</option>
+                                        <option value="gpu_hist">NVIDIA GPU (CUDA)</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="ui-rf" class="hidden config-group border-blue-100">
+                            <label class="label-cap text-blue-500">Random Forest Advanced</label>
+                            <div class="grid grid-cols-2 gap-4 mt-4">
+                                <div><label class="label-cap">Sampling</label><select id="cfg-rf-sample" class="input-elegant"><option value="all">All Classes</option><option value="auto">Auto Balanced</option></select></div>
+                                <div><label class="label-cap">Min Leaf</label><input type="number" id="cfg-rf-leaf" value="2" class="input-elegant"></div>
+                            </div>
+                        </div>
+
+                        <!-- 4. Heatwave Physics Logic -->
+                        <div class="config-group border-red-100 bg-red-50/10">
+                            <label class="label-cap text-red-500">Heatwave Detection Logic</label>
+                            <div class="grid grid-cols-2 gap-4 mt-4">
+                                <div><label class="label-cap">Threshold %tile</label><input type="number" id="cfg-percentile" value="95.0" step="0.5" class="input-elegant"></div>
+                                <div><label class="label-cap">Min Duration (Days)</label><input type="number" id="cfg-min-duration" value="3" class="input-elegant"></div>
+                                <div class="col-span-2"><label class="label-cap">Data Clipping (Low/High)</label>
+                                    <div class="flex space-x-2">
+                                        <input type="number" id="cfg-clip-low" value="0.5" class="input-elegant">
+                                        <input type="number" id="cfg-clip-high" value="99.5" class="input-elegant">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="pt-4 flex space-x-4">
+                            <button onclick="startTraining()" id="btn-run" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-black py-5 rounded-2xl shadow-xl shadow-indigo-200 transition-all active:scale-95 uppercase tracking-tighter">🚀 Initiate Training Job</button>
+                            <button onclick="stopTraining()" id="btn-stop" class="bg-slate-100 text-slate-400 font-bold px-8 rounded-2xl hover:bg-red-50 hover:text-red-500 transition-all" disabled>Abort</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT: DASHBOARD & METRICS (7 columns) -->
+            <div class="xl:col-span-7 space-y-8">
+                
+                <!-- Real-time Quick Stats -->
+                <div class="grid grid-cols-3 gap-6">
+                    <div class="soft-card p-8"><label class="label-cap">Validation F1</label><p id="stat-f1" class="text-4xl font-black text-indigo-600 mt-1">0.0000</p></div>
+                    <div class="soft-card p-8"><label class="label-cap">Overall Loss</label><p id="stat-loss" class="text-4xl font-black text-slate-800 mt-1">0.0000</p></div>
+                    <div class="soft-card p-8 relative overflow-hidden">
+                        <label class="label-cap">Job Progress</label>
+                        <p id="stat-pct" class="text-4xl font-black mt-1 text-slate-800">0%</p>
+                        <div id="stat-bar" class="absolute bottom-0 left-0 h-1.5 bg-indigo-500 w-0 transition-all duration-1000"></div>
+                    </div>
+                </div>
+
+                <!-- Main Visualization -->
+                <div class="soft-card p-10 h-[500px] flex flex-col">
+                    <div class="flex justify-between items-center mb-8">
+                        <h3 class="font-black text-xl text-slate-800">Learning Convergence</h3>
+                        <div class="flex space-x-6 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                            <span class="flex items-center"><span class="w-3 h-3 bg-red-400 rounded-full mr-2"></span> Training Loss</span>
+                            <span class="flex items-center"><span class="w-3 h-3 bg-indigo-600 rounded-full mr-2"></span> Val F1 Accuracy</span>
+                        </div>
+                    </div>
+                    <div class="flex-1 min-h-0"><canvas id="mainChart"></canvas></div>
+                </div>
+
+                <!-- Live Logs Console -->
+                <div class="soft-card p-8 bg-slate-900 border-none shadow-2xl">
+                    <div class="flex justify-between items-center mb-4">
+                        <span class="text-[10px] font-black uppercase text-slate-500 tracking-widest">Orchestrator Logs</span>
+                        <div id="hw-badge" class="text-[9px] font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">CPU_ENGINE</div>
+                    </div>
+                    <div id="console" class="h-40 overflow-y-auto mono text-indigo-300 space-y-1 opacity-80 text-xs"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Predictor & Hub (Remain clean as requested) -->
+        <div id="section-predictor" class="hidden"><div class="soft-card p-4 shadow-2xl"><div id="map"></div></div></div>
+        <div id="section-hub" class="hidden"><div class="soft-card p-12 text-center py-40"><p class="text-slate-400 font-bold uppercase tracking-widest italic">Model history integration pending...</p></div></div>
+
+    </main>
+
+    <script>
+        let mainChart;
+        let map;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/training`;
+        let socket;
+
+        function toggleBackendUI() {
+            const b = document.getElementById('cfg-backend').value;
+            document.getElementById('ui-xgb').classList.toggle('hidden', b !== 'xgboost');
+            document.getElementById('ui-rf').classList.toggle('hidden', b !== 'balanced_rf');
+        }
+
+        function switchTab(tabId) {
+            ['trainer', 'predictor', 'hub'].forEach(id => {
+                document.getElementById(`section-${id}`).classList.add('hidden');
+                document.getElementById(`btn-${id}`).classList.remove('active');
+            });
+            document.getElementById(`section-${tabId}`).classList.remove('hidden');
+            document.getElementById(`btn-${tabId}`).classList.add('active');
+            if (tabId === 'predictor' && !map) initMap();
+        }
+
+        function initMap() {
+            map = L.map('map', { zoomControl: false }).setView([13.7367, 100.5231], 6);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(map);
+        }
+
+        function initChart() {
+            const ctx = document.getElementById('mainChart').getContext('2d');
+            mainChart = new Chart(ctx, {
+                type: 'line',
+                data: { labels: [], datasets: [
+                    { label: 'Loss', borderColor: '#f87171', backgroundColor: 'rgba(248,113,113,0.05)', data: [], fill: true, tension: 0.4, borderWidth: 4, pointRadius: 0 },
+                    { label: 'F1 Score', borderColor: '#6366f1', data: [], tension: 0.4, yAxisID: 'y1', borderWidth: 4, pointRadius: 0 }
+                ]},
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: { grid: { color: '#f1f5f9' }, border: { display: false }, ticks: { color: '#94a3b8', font: { size: 10, weight: 'bold' } } },
+                        y1: { position: 'right', min: 0, max: 1, display: false },
+                        x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 10, weight: 'bold' } } }
+                    }
+                }
+            });
+        }
+
+        function connect() {
+            socket = new WebSocket(wsUrl);
+            socket.onopen = () => {
+                const s = document.getElementById('conn-status');
+                s.querySelector('div').className = 'w-1.5 h-1.5 rounded-full bg-green-500';
+                s.querySelector('span').innerText = 'Connected: System Online';
+            };
+            socket.onmessage = (e) => updateUI(JSON.parse(e.data));
+            socket.onclose = () => setTimeout(connect, 3000);
+        }
+
+        function updateUI(data) {
+            document.getElementById('stat-pct').innerText = `${data.progress}%`;
+            document.getElementById('stat-bar').style.width = `${data.progress}%`;
+            
+            if (data.metrics.epochs.length > 0) {
+                const f1 = data.metrics.val_accuracy.slice(-1)[0];
+                const loss = data.metrics.train_loss.slice(-1)[0];
+                document.getElementById('stat-f1').innerText = f1.toFixed(4);
+                document.getElementById('stat-loss').innerText = loss.toFixed(5);
+                
+                if (data.metrics.epochs.length > mainChart.data.labels.length) {
+                    mainChart.data.labels = data.metrics.epochs;
+                    mainChart.data.datasets[0].data = data.metrics.train_loss;
+                    mainChart.data.datasets[1].data = data.metrics.val_accuracy;
+                    mainChart.update();
+                    log(`JOB_UPDATE: Epoch ${data.metrics.epochs.slice(-1)} | F1=${f1.toFixed(4)} | Loss=${loss.toFixed(4)}`);
+                }
+            }
+
+            document.getElementById('btn-run').disabled = data.status === 'running';
+            document.getElementById('btn-run').style.opacity = data.status === 'running' ? '0.5' : '1';
+            document.getElementById('btn-stop').disabled = data.status !== 'running';
+        }
+
+        async function startTraining() {
+            const config = {
+                model_backend: document.getElementById('cfg-backend').value,
+                rf_n_estimators: parseInt(document.getElementById('cfg-estimators').value),
+                rf_max_depth: parseInt(document.getElementById('cfg-depth').value),
+                learning_rate: parseFloat(document.getElementById('cfg-lr').value),
+                seq_len: parseInt(document.getElementById('cfg-seq-len').value),
+                future_seq: parseInt(document.getElementById('cfg-future-seq').value),
+                train_ratio: parseFloat(document.getElementById('cfg-split').value),
+                xgb_subsample: parseFloat(document.getElementById('cfg-subsample').value),
+                xgb_colsample_bytree: parseFloat(document.getElementById('cfg-colsample').value),
+                xgb_tree_method: document.getElementById('cfg-tree-method').value,
+                rf_sampling_strategy: document.getElementById('cfg-rf-sample').value,
+                rf_min_samples_leaf: parseInt(document.getElementById('cfg-rf-leaf').value),
+                heatwave_percentile: parseFloat(document.getElementById('cfg-percentile').value),
+                event_min_duration_days: parseInt(document.getElementById('cfg-min-duration').value),
+                clip_low_percentile: parseFloat(document.getElementById('cfg-clip-low').value),
+                clip_high_percentile: parseFloat(document.getElementById('cfg-clip-high').value),
+                use_gpu: document.getElementById('cfg-tree-method').value === 'gpu_hist',
+                epochs: 1
+            };
+            log("System: Starting deep training job...");
+            await fetch('/api/training/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+        }
+
+        async function stopTraining() { await fetch('/api/training/stop', { method: 'POST' }); }
+
+        function log(msg) {
+            const c = document.getElementById('console');
+            const e = document.createElement('div');
+            e.innerHTML = `<span class="opacity-30">[${new Date().toLocaleTimeString()}]</span> ${msg}`;
+            c.appendChild(e);
+            c.scrollTop = c.scrollHeight;
+        }
+
+        async function checkHW() {
+            const res = await fetch('/api/health');
+            const data = await res.json();
+            document.getElementById('hw-badge').innerText = data.gpu.torch_cuda ? "NVIDIA_RTX_ACTIVE" : "CPU_ENGINE_ONLY";
+        }
+
+        window.onload = () => { initChart(); connect(); checkHW(); toggleBackendUI(); };
+    </script>
+</body>
+</html>
