@@ -14,9 +14,17 @@ import json
 import logging
 import pickle
 from typing import Optional, Any
+import xarray as xr
 from Train_Ai import train as run_training
-from src.data.loader import load_era5_data, create_sequences, normalize_data, clean_data
+from src.data.loader import (
+    load_era5_data,
+    create_sequences,
+    normalize_data,
+    clean_data,
+    compute_normalization_stats,
+)
 from src.models.convlstm import HeatwaveConvLSTM
+from api_daily_predict import init_daily_routes  # Daily XGBoost prediction
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS
@@ -28,6 +36,8 @@ FUTURE_SEQ = 2
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LOGGER = logging.getLogger(__name__)
 EPSILON = 1e-6
+REGION_SAMPLING_RADIUS_DEGREES = 0.75
+REGION_SAMPLING_SIGMA_KM = 45.0
 
 
 class _TrainingPollLogFilter(logging.Filter):
@@ -77,6 +87,29 @@ runtime_seq_len = SEQ_LEN
 runtime_future_seq = FUTURE_SEQ
 runtime_model_type = "balanced_random_forest"
 training_lock = threading.Lock()
+# Track original model type for fallback
+_original_model_loaded = False
+# XGBoost model reference
+_xgboost_model = None
+
+# Track original model type for fallback
+_original_model_loaded = False
+# XGBoost model reference
+_xgboost_model = None
+# Track original data time for accurate date reporting
+_test_time_index: Optional[list] = None
+_test_time_base: Optional[datetime.datetime] = None
+WEB_REGIONS = [
+    {"name": "Bangkok", "zone": "Central", "lat": 13.7563, "lng": 100.5018},
+    {"name": "Chiang Mai", "zone": "North", "lat": 18.7883, "lng": 98.9853},
+    {"name": "Chiang Rai", "zone": "North", "lat": 19.9072, "lng": 99.8329},
+    {"name": "Khon Kaen", "zone": "Northeast", "lat": 16.4423, "lng": 102.1426},
+    {"name": "Nakhon Si Thammarat", "zone": "South", "lat": 8.4333, "lng": 99.9333},
+    {"name": "Surat Thani", "zone": "South", "lat": 9.1401, "lng": 99.3331},
+    {"name": "Pattaya", "zone": "Central", "lat": 12.9333, "lng": 100.8833},
+    {"name": "Phitsanulok", "zone": "North", "lat": 16.8281, "lng": 100.2624},
+    {"name": "Korat", "zone": "Northeast", "lat": 14.9799, "lng": 102.0782},
+]
 training_state = {
     "status": "idle",
     "started_at": None,
@@ -103,11 +136,11 @@ def get_latest_model(model_dir):
         except (ValueError, IndexError):
             return 0
 
-    # Prefer ConvLSTM (real temperature regression) if available
-    if convlstm_files:
-        return max(convlstm_files, key=get_version)
+    # Prefer RF/checkpoint (XGBoost v60) over ConvLSTM
     if rf_files:
         return max(rf_files, key=get_version)
+    if convlstm_files:
+        return max(convlstm_files, key=get_version)
     return None
 
 
@@ -245,27 +278,198 @@ def _calculate_event_accuracy(metrics):
         return None
 
 
-def get_risk_and_probability(max_temp, model_probability=None):
-    risk_level = "LOW"
-    if max_temp >= 35:
-        risk_level = "MEDIUM"
-    if max_temp >= 38:
-        risk_level = "HIGH"
-    if max_temp >= 41:
-        risk_level = "CRITICAL"
+def _as_coord_array(values, axis_name):
+    if values is None:
+        return None
+    try:
+        arr = np.asarray(values, dtype=np.float32).reshape(-1)
+    except Exception:
+        LOGGER.warning("Unable to parse checkpoint %s coordinates", axis_name)
+        return None
+    if arr.size == 0 or not np.all(np.isfinite(arr)):
+        LOGGER.warning("Checkpoint %s coordinates are empty or invalid", axis_name)
+        return None
+    return arr
 
+
+def _coords_match(source, target, atol=1e-6):
+    return (
+        source is not None
+        and target is not None
+        and source.shape == target.shape
+        and np.allclose(source, target, atol=atol)
+    )
+
+
+def _align_data_to_checkpoint_grid(data, source_lats, source_lons, metadata):
+    target_lats = _as_coord_array(metadata.get("lats"), "latitude")
+    target_lons = _as_coord_array(metadata.get("lons"), "longitude")
+    if target_lats is None or target_lons is None:
+        return data, source_lats, source_lons, False
+
+    source_lats = np.asarray(source_lats, dtype=np.float32).reshape(-1)
+    source_lons = np.asarray(source_lons, dtype=np.float32).reshape(-1)
+
+    if _coords_match(source_lats, target_lats) and _coords_match(source_lons, target_lons):
+        return data, source_lats, source_lons, False
+
+    LOGGER.warning(
+        "Spatial grid mismatch between checkpoint and runtime data. "
+        "Regridding API data from (%s lat, %s lon) to (%s lat, %s lon).",
+        len(source_lats),
+        len(source_lons),
+        len(target_lats),
+        len(target_lons),
+    )
+
+    aligned = xr.DataArray(
+        data,
+        dims=("time", "channel", "latitude", "longitude"),
+        coords={"latitude": source_lats, "longitude": source_lons},
+    ).interp(latitude=target_lats, longitude=target_lons, method="linear")
+
+    aligned_data = np.asarray(
+        aligned.transpose("time", "channel", "latitude", "longitude").values,
+        dtype=np.float32,
+    )
+    np.nan_to_num(aligned_data, copy=False)
+    return aligned_data, target_lats, target_lons, True
+
+
+def _refresh_static_coordinate_channels(data, lats, lons):
+    channel_layouts = {
+        6: (4, 5),
+        8: (6, 7),
+    }
+    coord_indices = channel_layouts.get(int(data.shape[1]))
+    if coord_indices is None:
+        return data
+
+    lat_grid, lon_grid = np.meshgrid(lats, lons, indexing="ij")
+    lat_idx, lon_idx = coord_indices
+    data[:, lat_idx, :, :] = lat_grid[None, :, :]
+    data[:, lon_idx, :, :] = lon_grid[None, :, :]
+    return data
+
+
+RISK_LEVELS = (
+    {
+        "index": 0,
+        "code": "LOW",
+        "label": "LOW",
+        "default_probability": 0.1,
+    },
+    {
+        "index": 1,
+        "code": "MEDIUM",
+        "label": "MEDIUM",
+        "default_probability": 0.5,
+    },
+    {
+        "index": 2,
+        "code": "HIGH",
+        "label": "HIGH",
+        "default_probability": 0.8,
+    },
+    {
+        "index": 3,
+        "code": "CRITICAL",
+        "label": "CRITICAL",
+        "default_probability": 0.95,
+    },
+)
+RISK_CODE_TO_LEVEL = {entry["code"]: entry for entry in RISK_LEVELS}
+RISK_INDEX_TO_LEVEL = {entry["index"]: entry for entry in RISK_LEVELS}
+# Temperature thresholds for Thailand heatwave risk classification
+# 28.6°C is normal/cool for Thailand (LOW risk)
+RISK_TEMP_THRESHOLDS = (
+    (40.0, "CRITICAL"),  # Extreme heatwave - above 40°C
+    (38.0, "HIGH"),      # Dangerous heat - 38-40°C
+    (35.0, "MEDIUM"),    # Elevated heat - 35-38°C
+)
+
+
+def _coerce_risk_index(value):
+    try:
+        risk_index = int(value)
+    except (TypeError, ValueError):
+        risk_index = 0
+    max_index = max(RISK_INDEX_TO_LEVEL)
+    return int(min(max(risk_index, 0), max_index))
+
+
+def _coerce_risk_code(value):
+    code = str(value).strip().upper()
+    if code in RISK_CODE_TO_LEVEL:
+        return code
+    return "LOW"
+
+
+def _risk_code_for_temperature(max_temp):
+    for threshold, code in RISK_TEMP_THRESHOLDS:
+        if max_temp >= threshold:
+            return code
+    return "LOW"
+
+
+def _risk_probability_for_code(risk_code, model_probability=None):
     if model_probability is not None:
-        probability = float(model_probability)
-    else:
-        fallback_lookup = {
-            "LOW": 0.1,
-            "MEDIUM": 0.5,
-            "HIGH": 0.8,
-            "CRITICAL": 0.95,
-        }
-        probability = fallback_lookup[risk_level]
+        try:
+            return float(np.clip(float(model_probability), 0.0, 1.0))
+        except (TypeError, ValueError):
+            pass
+    return float(RISK_CODE_TO_LEVEL[risk_code]["default_probability"])
 
-    return risk_level, probability
+
+def _build_risk_payload_from_code(risk_code, model_probability=None):
+    code = _coerce_risk_code(risk_code)
+    level = RISK_CODE_TO_LEVEL[code]
+    payload = {
+        "risk_code": code,
+        "risk_label": level["label"],
+        "risk_index": int(level["index"]),
+    }
+    if model_probability is not None:
+        payload["probability"] = _risk_probability_for_code(
+            code, model_probability=model_probability
+        )
+    return payload
+
+
+def _build_risk_payload_from_temperature(max_temp, model_probability=None):
+    risk_code = _risk_code_for_temperature(float(max_temp))
+    payload = _build_risk_payload_from_code(risk_code)
+    payload["probability"] = _risk_probability_for_code(
+        risk_code, model_probability=model_probability
+    )
+    return payload
+
+
+def _build_risk_payload_from_index(risk_index):
+    level = RISK_INDEX_TO_LEVEL[_coerce_risk_index(risk_index)]
+    return {
+        "risk_code": level["code"],
+        "risk_label": level["label"],
+        "risk_index": int(level["index"]),
+    }
+
+
+def _risk_legend():
+    return [
+        {
+            "risk_index": int(level["index"]),
+            "risk_code": level["code"],
+            "risk_label": level["label"],
+        }
+        for level in RISK_LEVELS
+    ]
+
+
+def get_risk_and_probability(max_temp, model_probability=None):
+    risk_payload = _build_risk_payload_from_temperature(
+        max_temp, model_probability=model_probability
+    )
+    return risk_payload["risk_code"], risk_payload["probability"]
 
 
 def detect_gpu_capability():
@@ -636,6 +840,63 @@ def resources_ready():
     )
 
 
+def get_sample_date(sample_idx=-1, day_offset=0):
+    """Get the date for a sample index with optional day offset.
+    
+    Returns the actual date from the test set time index if available,
+    otherwise falls back to datetime.now() with offset.
+    """
+    global _test_time_base, runtime_seq_len, runtime_future_seq
+    
+    if _test_time_base is not None:
+        # Calculate the date based on sample position in test set
+        # sample_idx=-1 means last sample, which is the most recent
+        base_date = _test_time_base
+        if sample_idx == -1:
+            # Last sample = most recent date in test set
+            return base_date + datetime.timedelta(days=day_offset)
+        else:
+            # Other samples are earlier
+            return base_date + datetime.timedelta(days=sample_idx + day_offset)
+    
+    # Fallback: use datetime.now() with offset from sample_idx
+    base_date = datetime.datetime.now()
+    if sample_idx == -1:
+        # For last sample, estimate based on sequence length
+        return base_date + datetime.timedelta(days=day_offset)
+    else:
+        return base_date + datetime.timedelta(days=sample_idx + day_offset)
+
+
+def _parse_checkpoint_times(metadata):
+    """Parse time information from checkpoint metadata."""
+    global _test_time_base
+    
+    # Try to get time info from checkpoint metadata
+    time_index = metadata.get("time_index", [])
+    if time_index and len(time_index) > 0:
+        try:
+            # Parse the last timestamp
+            last_time_str = time_index[-1]
+            _test_time_base = datetime.datetime.fromisoformat(last_time_str.replace("Z", "+00:00"))
+            return
+        except (ValueError, TypeError):
+            pass
+    
+    # Try to get from data_time_base
+    data_time_base = metadata.get("data_time_base")
+    if data_time_base:
+        try:
+            _test_time_base = datetime.datetime.fromisoformat(str(data_time_base).replace("Z", "+00:00"))
+            return
+        except (ValueError, TypeError):
+            pass
+    
+    # No time info available, will use datetime.now() fallback
+    LOGGER.warning("No time information found in checkpoint, using datetime.now() for dates")
+    _test_time_base = None
+
+
 def load_resources(checkpoint_path=None, skip_data_reload=False):
     global model, X_test, Y_test, lats, lons, mean, std
     global temp_mean_scalar, temp_std_scalar, bbox, _prediction_cache
@@ -649,6 +910,9 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
     print(f"Loading model from {checkpoint_path}...")
     checkpoint = _safe_torch_load(checkpoint_path, map_location=DEVICE)
     metadata = checkpoint.get("metadata", {}) if isinstance(checkpoint, dict) else {}
+
+    # Parse time information from checkpoint for accurate date reporting
+    _parse_checkpoint_times(metadata)
 
     runtime_seq_len = int(metadata.get("seq_len", SEQ_LEN))
     runtime_future_seq = int(metadata.get("future_seq", FUTURE_SEQ))
@@ -723,6 +987,13 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
         LOGGER.exception("Error loading data: %s", e)
         return False
 
+    data_raw, lats, lons, grid_aligned = _align_data_to_checkpoint_grid(
+        data_raw, lats, lons, metadata
+    )
+    if grid_aligned:
+        data_raw = _refresh_static_coordinate_channels(data_raw, lats, lons)
+        data_mean, data_std = compute_normalization_stats(data_raw)
+
     expected_input_dim = int(metadata.get("input_dim", data_raw.shape[1]))
     current_input_dim = int(data_raw.shape[1])
     if current_input_dim != expected_input_dim:
@@ -752,6 +1023,25 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
                 "Checkpoint expects %s channels but data loader provides %s",
                 expected_input_dim,
                 current_input_dim,
+            )
+            return False
+
+    expected_flat_dim = None
+    if runtime_model_type != "convlstm":
+        expected_flat_dim = int(getattr(model, "n_features_in_", 0) or 0)
+        current_flat_dim = int(
+            runtime_seq_len * data_raw.shape[1] * data_raw.shape[2] * data_raw.shape[3]
+        )
+        if expected_flat_dim and current_flat_dim != expected_flat_dim:
+            LOGGER.error(
+                "Feature layout mismatch after resource load: expected_flat=%s actual_flat=%s "
+                "(seq_len=%s channels=%s lat=%s lon=%s)",
+                expected_flat_dim,
+                current_flat_dim,
+                runtime_seq_len,
+                data_raw.shape[1],
+                data_raw.shape[2],
+                data_raw.shape[3],
             )
             return False
 
@@ -794,8 +1084,22 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
     X_test = X[split_idx:]
     Y_test = Y[split_idx:]
 
-    temp_mean_scalar = float(mean[0, 1, 0, 0])
-    temp_std_scalar = float(std[0, 1, 0, 0])
+    # Load temperature stats - prefer Celsius from checkpoint if available
+    # Train_Ai.py saves temp_mean in Celsius (converted from Kelvin at line 1588)
+    checkpoint_temp_mean = metadata.get("temp_mean")
+    checkpoint_temp_std = metadata.get("temp_std")
+    
+    if checkpoint_temp_mean is not None and checkpoint_temp_std is not None:
+        # Use the Celsius values saved by Train_Ai.py
+        temp_mean_scalar = float(checkpoint_temp_mean)
+        temp_std_scalar = float(checkpoint_temp_std)
+        LOGGER.info(f"Using checkpoint temperature stats: mean={temp_mean_scalar:.2f}°C, std={temp_std_scalar:.2f}")
+    else:
+        # Fallback: extract from normalization stats (likely in Kelvin)
+        temp_mean_scalar = float(mean[0, 1, 0, 0])
+        temp_std_scalar = float(std[0, 1, 0, 0])
+        LOGGER.warning(f"No checkpoint temp_mean found, using normalization stats: mean={temp_mean_scalar:.2f}")
+    
     bbox = {
         "north": float(np.max(lats)),
         "south": float(np.min(lats)),
@@ -893,26 +1197,49 @@ def get_prediction_sequence(sample_idx=-1, days=7):
         # output shape: (1, days, channels, H, W)
         for d in range(days):
             temp_norm = output[0, d, 1, :, :].cpu().numpy()
-            temp_celsius = temp_norm * (temp_std_scalar + EPSILON) + temp_mean_scalar
-            if np.nanmean(temp_celsius) > 200:
-                temp_celsius = temp_celsius - 273.15
+            temp_denorm = temp_norm * (temp_std_scalar + EPSILON) + temp_mean_scalar
+            
+            # Detect if temp_denorm is in Kelvin or Celsius
+            # Thailand temps should be 20-45°C, not 250-320K after denorm
+            # If mean > 200, it's likely Kelvin and needs conversion
+            if np.nanmean(temp_denorm) > 200:
+                temp_celsius = temp_denorm - 273.15
+            else:
+                temp_celsius = temp_denorm
+            
+            # Clamp to reasonable Celsius range for Thailand (-10 to 60°C)
+            temp_celsius = np.clip(temp_celsius, -10.0, 60.0)
+            
             # Probability derived from predicted max temperature
             max_temp = float(np.nanmax(temp_celsius))
             prob = min(1.0, max(0.0, (max_temp - 30.0) / 15.0))
             outputs.append((temp_celsius, prob))
     else:
         # RF path: persistence baseline + classifier probability per day
+        expected_flat_dim = int(getattr(model, "n_features_in_", 0) or 0)
         for _ in range(days):
             x_flat = x_seq.reshape(1, -1)
+            if expected_flat_dim and x_flat.shape[1] != expected_flat_dim:
+                raise RuntimeError(
+                    "Feature shape mismatch after API resource alignment, "
+                    f"expected: {expected_flat_dim}, got: {x_flat.shape[1]}"
+                )
             prob = float(model.predict_proba(x_flat)[0, 1])
 
             # Persistence baseline: last observed temperature frame
             pred_step = np.array(x_seq[-1], copy=True)
 
             temp_norm = pred_step[1]
-            temp_celsius = (temp_norm * (temp_std_scalar + EPSILON)) + temp_mean_scalar
-            if np.nanmean(temp_celsius) > 200:
-                temp_celsius -= 273.15
+            temp_denorm = (temp_norm * (temp_std_scalar + EPSILON)) + temp_mean_scalar
+            
+            # Detect if temp_denorm is in Kelvin or Celsius
+            if np.nanmean(temp_denorm) > 200:
+                temp_celsius = temp_denorm - 273.15
+            else:
+                temp_celsius = temp_denorm
+            
+            # Clamp to reasonable Celsius range for Thailand (-10 to 60°C)
+            temp_celsius = np.clip(temp_celsius, -10.0, 60.0)
             outputs.append((temp_celsius, prob))
 
             # Autoregressive update for classifier backend
@@ -922,11 +1249,242 @@ def get_prediction_sequence(sample_idx=-1, days=7):
     return outputs
 
 
+def _nearest_grid_indices(target_lat, target_lon):
+    assert lats is not None
+    assert lons is not None
+    lat_idx = int(np.abs(np.asarray(lats, dtype=np.float32) - float(target_lat)).argmin())
+    lon_idx = int(np.abs(np.asarray(lons, dtype=np.float32) - float(target_lon)).argmin())
+    return lat_idx, lon_idx
+
+
+def _sample_region_temperature(temp_grid, target_lat, target_lon):
+    assert lats is not None
+    assert lons is not None
+
+    lat_values = np.asarray(lats, dtype=np.float32)
+    lon_values = np.asarray(lons, dtype=np.float32)
+    target_lat = float(target_lat)
+    target_lon = float(target_lon)
+
+    lat_mask = np.abs(lat_values - target_lat) <= REGION_SAMPLING_RADIUS_DEGREES
+    lon_mask = np.abs(lon_values - target_lon) <= REGION_SAMPLING_RADIUS_DEGREES
+
+    lat_indices = np.where(lat_mask)[0]
+    lon_indices = np.where(lon_mask)[0]
+
+    fallback_lat_idx, fallback_lon_idx = _nearest_grid_indices(target_lat, target_lon)
+
+    if lat_indices.size == 0 or lon_indices.size == 0:
+        sampled_temperature = float(temp_grid[fallback_lat_idx, fallback_lon_idx])
+        return {
+            "temperature": sampled_temperature,
+            "grid_lat": float(lats[fallback_lat_idx]),
+            "grid_lng": float(lons[fallback_lon_idx]),
+            "sample_count": 1,
+            "sampling_method": "nearest_grid_fallback",
+            "sampling_radius_degrees": REGION_SAMPLING_RADIUS_DEGREES,
+            "sampling_sigma_km": REGION_SAMPLING_SIGMA_KM,
+        }
+
+    local_grid = np.asarray(temp_grid[np.ix_(lat_indices, lon_indices)], dtype=np.float32)
+    local_lats = lat_values[lat_indices]
+    local_lons = lon_values[lon_indices]
+    mesh_lats, mesh_lons = np.meshgrid(local_lats, local_lons, indexing="ij")
+
+    lat_distance_km = (mesh_lats - target_lat) * 111.0
+    lon_distance_km = (mesh_lons - target_lon) * 111.0 * max(
+        np.cos(np.radians(target_lat)), 0.2
+    )
+    distance_km = np.sqrt(lat_distance_km**2 + lon_distance_km**2)
+
+    finite_mask = np.isfinite(local_grid)
+    if not np.any(finite_mask):
+        sampled_temperature = float(temp_grid[fallback_lat_idx, fallback_lon_idx])
+        return {
+            "temperature": sampled_temperature,
+            "grid_lat": float(lats[fallback_lat_idx]),
+            "grid_lng": float(lons[fallback_lon_idx]),
+            "sample_count": 1,
+            "sampling_method": "nearest_grid_fallback",
+            "sampling_radius_degrees": REGION_SAMPLING_RADIUS_DEGREES,
+            "sampling_sigma_km": REGION_SAMPLING_SIGMA_KM,
+        }
+
+    weights = np.exp(-0.5 * (distance_km / REGION_SAMPLING_SIGMA_KM) ** 2)
+    weights = np.where(finite_mask, weights, 0.0)
+    weight_sum = float(np.sum(weights))
+
+    if weight_sum <= 0:
+        sampled_temperature = float(temp_grid[fallback_lat_idx, fallback_lon_idx])
+        return {
+            "temperature": sampled_temperature,
+            "grid_lat": float(lats[fallback_lat_idx]),
+            "grid_lng": float(lons[fallback_lon_idx]),
+            "sample_count": 1,
+            "sampling_method": "nearest_grid_fallback",
+            "sampling_radius_degrees": REGION_SAMPLING_RADIUS_DEGREES,
+            "sampling_sigma_km": REGION_SAMPLING_SIGMA_KM,
+        }
+
+    sampled_temperature = float(np.sum(local_grid * weights) / weight_sum)
+    nearest_local_index = int(np.argmin(np.where(finite_mask, distance_km, np.inf)))
+    nearest_row, nearest_col = np.unravel_index(nearest_local_index, distance_km.shape)
+
+    return {
+        "temperature": sampled_temperature,
+        "grid_lat": float(mesh_lats[nearest_row, nearest_col]),
+        "grid_lng": float(mesh_lons[nearest_row, nearest_col]),
+        "sample_count": int(np.count_nonzero(finite_mask)),
+        "sampling_method": "distance_weighted_area_average",
+        "sampling_radius_degrees": REGION_SAMPLING_RADIUS_DEGREES,
+        "sampling_sigma_km": REGION_SAMPLING_SIGMA_KM,
+    }
+
+
+def _region_payload_from_grid(temp_grid, model_probability=None):
+    regions = []
+
+    for region in WEB_REGIONS:
+        sampled_region = _sample_region_temperature(
+            temp_grid, region["lat"], region["lng"]
+        )
+        temperature = float(sampled_region["temperature"])
+        risk_payload = _build_risk_payload_from_temperature(temperature)
+        probability = risk_payload["probability"]
+
+        if model_probability is not None:
+            probability = max(
+                probability,
+                float(np.clip(float(model_probability), 0.0, 1.0))
+                if risk_payload["risk_code"] != "LOW"
+                else probability,
+            )
+
+        regions.append(
+            {
+                "name": region["name"],
+                "zone": region["zone"],
+                "lat": float(region["lat"]),
+                "lng": float(region["lng"]),
+                "grid_lat": sampled_region["grid_lat"],
+                "grid_lng": sampled_region["grid_lng"],
+                "temperature": round(temperature, 2),
+                "temperature_c": round(temperature, 2),
+                "risk_level": risk_payload["risk_code"],
+                "risk_code": risk_payload["risk_code"],
+                "risk_label": risk_payload["risk_label"],
+                "risk_index": risk_payload["risk_index"],
+                "probability": round(float(probability), 4),
+                "sample_count": sampled_region["sample_count"],
+                "sampling_method": sampled_region["sampling_method"],
+                "sampling_radius_degrees": sampled_region["sampling_radius_degrees"],
+                "sampling_sigma_km": sampled_region["sampling_sigma_km"],
+                "risk": {
+                    "risk_code": risk_payload["risk_code"],
+                    "risk_label": risk_payload["risk_label"],
+                    "risk_index": risk_payload["risk_index"],
+                },
+            }
+        )
+
+    return regions
+
+
 @app.route("/api/predict", methods=["GET"])
 def predict_summary():
-    """Returns summary statistics for the dashboard."""
+    """Returns summary statistics for the dashboard.
+    
+    Uses XGBoost daily model if available, otherwise falls back to ConvLSTM/RF.
+    """
+    # Try XGBoost first
+    try:
+        from api_daily_predict import daily_model_ready, load_daily_model, predict_from_daily_weather, _daily_threshold
+        
+        if daily_model_ready() or load_daily_model():
+            # Use XGBoost prediction
+            # Get latest temperature data from test set for features
+            if X_test is not None and len(X_test) > 0:
+                # Get the last sample's temperature features
+                last_sample = X_test[-1] if runtime_model_type == "convlstm" else X_test[-1]
+                
+                # Extract temperature statistics from test data
+                # The format depends on model type
+                if runtime_model_type == "convlstm" and temp_mean_scalar is not None:
+                    # ConvLSTM format: (seq_len, channels, H, W)
+                    temp_data = last_sample[-1, 1, :, :]  # Last timestep, temp channel
+                    temp_data = temp_data * (temp_std_scalar + EPSILON) + temp_mean_scalar
+                    if np.nanmean(temp_data) > 200:
+                        temp_data = temp_data - 273.15  # Convert Kelvin to Celsius
+                    temp_max = float(np.nanmax(temp_data))
+                    temp_mean = float(np.nanmean(temp_data))
+                    temp_min = float(np.nanmin(temp_data))
+                else:
+                    # RF format: flattened
+                    temp_max = 35.0  # Default
+                    temp_mean = 30.0
+                    temp_min = 25.0
+            else:
+                # No test data, use defaults
+                temp_max = 35.0
+                temp_mean = 30.0
+                temp_min = 25.0
+            
+            # Get XGBoost prediction
+            weather_data = {
+                'temp_mean': temp_mean,
+                'temp_max': temp_max,
+                'temp_min': temp_min,
+                'temp_std': 4.0,
+                'humidity': 70.0,
+            }
+            result = predict_from_daily_weather(weather_data)
+            
+            # Build response
+            actual_date = get_sample_date(sample_idx=-1, day_offset=0) if _test_time_base else datetime.datetime.now()
+            
+            risk_map = {
+                'LOW': {'code': 'LOW', 'label': 'Low Risk', 'index': 0, 'probability': result['heatwave_probability']},
+                'MEDIUM': {'code': 'MEDIUM', 'label': 'Medium Risk', 'index': 1, 'probability': result['heatwave_probability']},
+                'HIGH': {'code': 'HIGH', 'label': 'High Risk', 'index': 2, 'probability': result['heatwave_probability']},
+                'CRITICAL': {'code': 'CRITICAL', 'label': 'Critical Risk', 'index': 3, 'probability': result['heatwave_probability']},
+            }
+            
+            risk_info = risk_map.get(result['risk_level'], risk_map['LOW'])
+            
+            return jsonify({
+                "status": "ok",
+                "date": actual_date.strftime("%Y-%m-%d") if hasattr(actual_date, 'strftime') else str(actual_date),
+                "data_date": actual_date.strftime("%Y-%m-%d") if hasattr(actual_date, 'strftime') else str(actual_date),
+                "generated_at": datetime.datetime.now().isoformat(),
+                "risk_level": risk_info['code'],
+                "risk_code": risk_info['code'],
+                "risk_label": risk_info['label'],
+                "risk_index": risk_info['index'],
+                "probability": result['heatwave_probability'],
+                "advice": f"Temperature {temp_max:.1f}C with {result['heatwave_probability']*100:.1f}% heatwave probability. {risk_info['label']}.",
+                "model_type": "xgboost_daily",
+                "weather": {
+                    "T2M_MAX": temp_max,
+                    "T2M": temp_mean,
+                    "T2M_MIN": temp_min,
+                    "RH2M": None,
+                    "WS10M": None,
+                },
+                "anomaly": {
+                    "is_anomaly": result['heatwave_predicted'],
+                    "severity": result['risk_level'].lower(),
+                    "n_triggers": 0,
+                    "triggers": [],
+                },
+                "bbox": bbox,
+                "regions": [],
+            })
+    except Exception as e:
+        LOGGER.warning(f"XGBoost prediction failed, falling back to ConvLSTM: {e}")
+    
+    # Fallback to ConvLSTM/RF model
     if not resources_ready():
-        return jsonify({"error": "Model not loaded"}), 500
+        return jsonify({"error": "No model loaded"}), 500
 
     try:
         temp_grid, prob = get_prediction_data()
@@ -934,15 +1492,29 @@ def predict_summary():
         mean_temp = float(np.mean(temp_grid))
         min_temp = float(np.min(temp_grid))
 
-        risk_level, probability = get_risk_and_probability(
-            max_temp, model_probability=prob
-        )
+        # Get actual date from data
+        actual_date = get_sample_date(sample_idx=-1, day_offset=0)
+        
+        risk_payload = _build_risk_payload_from_temperature(max_temp, model_probability=prob)
+        region_payload = _region_payload_from_grid(temp_grid, model_probability=prob)
+        risk_level = risk_payload["risk_code"]
+        probability = risk_payload["probability"]
 
         return jsonify(
             {
                 "status": "ok",
-                "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+                "date": actual_date.strftime("%Y-%m-%d"),
+                "data_date": actual_date.strftime("%Y-%m-%d"),
+                "generated_at": datetime.datetime.now().isoformat(),
                 "risk_level": risk_level,
+                "risk_code": risk_payload["risk_code"],
+                "risk_label": risk_payload["risk_label"],
+                "risk_index": risk_payload["risk_index"],
+                "risk": {
+                    "risk_code": risk_payload["risk_code"],
+                    "risk_label": risk_payload["risk_label"],
+                    "risk_index": risk_payload["risk_index"],
+                },
                 "probability": probability,
                 "advice": f"Max temp reaching {max_temp:.1f} C. {risk_level} precautions advised.",
                 "model_type": runtime_model_type,
@@ -960,6 +1532,7 @@ def predict_summary():
                     "triggers": [],
                 },
                 "bbox": bbox,
+                "regions": region_payload,
             }
         )
     except Exception as e:
@@ -977,28 +1550,38 @@ def forecast_summary():
         temp_grids = get_prediction_sequence(days=7)
 
         days = []
-        base_date = datetime.datetime.now()
+        region_forecasts = {region["name"]: [] for region in WEB_REGIONS}
+        
+        # Use actual date from data for base
+        base_date = get_sample_date(sample_idx=-1, day_offset=0)
+        generated_at = datetime.datetime.now()
 
         for i in range(7):
-            date = (base_date + datetime.timedelta(days=i + 1)).strftime("%Y-%m-%d")
+            forecast_date = base_date + datetime.timedelta(days=i + 1)
+            date_str = forecast_date.strftime("%Y-%m-%d")
             temp_grid, prob = temp_grids[i]
             mean_temp = float(np.mean(temp_grid))
             min_temp = float(np.min(temp_grid))
             t_max = float(np.max(temp_grid))
-            risk_level, probability = get_risk_and_probability(
-                t_max, model_probability=prob
-            )
+            risk_payload = _build_risk_payload_from_temperature(t_max, model_probability=prob)
+            risk_level = risk_payload["risk_code"]
+            probability = risk_payload["probability"]
 
             days.append(
                 {
                     "day": i + 1,
-                    "date": date,
-                    "day_name": (base_date + datetime.timedelta(days=i + 1)).strftime(
-                        "%a"
-                    ),
+                    "date": date_str,
+                    "day_name": forecast_date.strftime("%a"),
                     "probability": probability,
                     "risk_level": risk_level,
-                    "risk_label": risk_level,
+                    "risk_code": risk_payload["risk_code"],
+                    "risk_label": risk_payload["risk_label"],
+                    "risk_index": risk_payload["risk_index"],
+                    "risk": {
+                        "risk_code": risk_payload["risk_code"],
+                        "risk_label": risk_payload["risk_label"],
+                        "risk_index": risk_payload["risk_index"],
+                    },
                     "advice": f"Generated from {runtime_model_type} autoregressive forecast",
                     "weather": {
                         "T2M": mean_temp,
@@ -1012,13 +1595,55 @@ def forecast_summary():
                 }
             )
 
+            day_region_payload = _region_payload_from_grid(temp_grid, model_probability=prob)
+            for region_entry in day_region_payload:
+                region_forecasts[region_entry["name"]].append(
+                    {
+                        "day": i + 1,
+                        "date": date_str,
+                        "day_name": forecast_date.strftime("%a"),
+                        "probability": region_entry["probability"],
+                        "risk_level": region_entry["risk_code"],
+                        "risk_code": region_entry["risk_code"],
+                        "risk_label": region_entry["risk_label"],
+                        "risk_index": region_entry["risk_index"],
+                        "risk": {
+                            "risk_code": region_entry["risk_code"],
+                            "risk_label": region_entry["risk_label"],
+                            "risk_index": region_entry["risk_index"],
+                        },
+                        "weather": {
+                            "T2M": region_entry["temperature"],
+                            "T2M_MAX": region_entry["temperature"],
+                            "T2M_MIN": region_entry["temperature"],
+                        },
+                        "temperature": region_entry["temperature"],
+                        "temperature_c": region_entry["temperature"],
+                    }
+                )
+
+        region_forecast_items = []
+        for region in WEB_REGIONS:
+            region_days = region_forecasts.get(region["name"], [])
+            region_forecast_items.append(
+                {
+                    "name": region["name"],
+                    "zone": region["zone"],
+                    "lat": float(region["lat"]),
+                    "lng": float(region["lng"]),
+                    "forecast": region_days,
+                }
+            )
+
         return jsonify(
             {
                 "status": "ok",
                 "model_type": runtime_model_type,
                 "days": 7,
-                "generated_at": base_date.isoformat(),
+                "base_date": base_date.strftime("%Y-%m-%d"),
+                "generated_at": generated_at.isoformat(),
                 "forecasts": days,
+                "region_forecasts": region_forecast_items,
             }
         )
 
@@ -1067,6 +1692,7 @@ def predict_map():
                 lon = float(lons[c])
 
                 risk = int(risk_grid[r, c])
+                risk_payload = _build_risk_payload_from_index(risk)
 
                 min_lon, max_lon = lon - dlon / 2, lon + dlon / 2
                 min_lat, max_lat = lat - dlat / 2, lat + dlat / 2
@@ -1082,11 +1708,45 @@ def predict_map():
                 feature = {
                     "type": "Feature",
                     "geometry": {"type": "Polygon", "coordinates": [poly_coords]},
-                    "properties": {"temperature": round(val, 2), "risk_level": risk},
+                    "properties": {
+                        "temperature": round(val, 2),
+                        "temperature_c": round(val, 2),
+                        "risk_level": risk,
+                        "risk_code": risk_payload["risk_code"],
+                        "risk_label": risk_payload["risk_label"],
+                        "risk_index": risk_payload["risk_index"],
+                        "risk": {
+                            "risk_code": risk_payload["risk_code"],
+                            "risk_label": risk_payload["risk_label"],
+                            "risk_index": risk_payload["risk_index"],
+                        },
+                    },
                 }
                 features.append(feature)
 
-        return jsonify({"type": "FeatureCollection", "features": features})
+        return jsonify(
+            {
+                "type": "FeatureCollection",
+                "features": features,
+                "risk_schema": {
+                    "legacy_fields": {
+                        "risk_level": "numeric index (0..3)",
+                    },
+                    "canonical_fields": {
+                        "feature.properties.temperature_c": "temperature in Celsius",
+                        "feature.properties.risk_code": "LOW|MEDIUM|HIGH|CRITICAL",
+                        "feature.properties.risk_label": "LOW|MEDIUM|HIGH|CRITICAL",
+                        "feature.properties.risk_index": "0..3",
+                        "feature.properties.risk": {
+                            "risk_code": "LOW|MEDIUM|HIGH|CRITICAL",
+                            "risk_label": "LOW|MEDIUM|HIGH|CRITICAL",
+                            "risk_index": "0..3",
+                        },
+                    },
+                    "levels": _risk_legend(),
+                },
+            }
+        )
 
     except Exception as e:
         LOGGER.exception("Predict map failed: %s", e)
@@ -1192,10 +1852,41 @@ def health_check():
 
 
 if __name__ == "__main__":
+    # Try to load XGBoost daily model first (preferred)
+    xgboost_loaded = False
+    try:
+        from api_daily_predict import load_daily_model, daily_model_ready
+        if load_daily_model():
+            print("XGBoost daily model loaded successfully!")
+            xgboost_loaded = True
+    except Exception as e:
+        LOGGER.warning(f"Could not load XGBoost model: {e}")
+    
+    # Then load ConvLSTM/RF model (fallback)
     if not load_resources():
         LOGGER.warning(
-            "Startup continuing without loaded model. Web trainer remains available."
+            "ConvLSTM/RF model not loaded. Using XGBoost only."
         )
+    
+    # Initialize daily prediction routes
+    try:
+        from api_daily_predict import init_daily_routes
+        init_daily_routes(app)
+        print("Daily prediction API initialized.")
+    except Exception as e:
+        LOGGER.warning(f"Could not initialize daily prediction API: {e}")
+    
+    print("\n" + "=" * 50)
+    print("AGNI HEATWAVE FORECAST API")
+    print("=" * 50)
+    print(f"XGBoost Daily Model: {'LOADED' if xgboost_loaded else 'NOT LOADED'}")
+    print(f"ConvLSTM/RF Model: {'LOADED' if resources_ready() else 'NOT LOADED'}")
+    print("\nAPI Endpoints:")
+    print("  POST /api/daily/predict - XGBoost prediction (recommended)")
+    print("  GET  /api/predict       - Legacy prediction")
+    print("  GET  /api/health        - Health check")
+    print("=" * 50 + "\n")
+    
     print("Starting Flask API on port 5000...")
     app.run(host="0.0.0.0", port=5000, debug=False)
 
