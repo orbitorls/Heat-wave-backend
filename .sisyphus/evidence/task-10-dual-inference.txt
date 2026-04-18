@@ -1,0 +1,3 @@
+PASS: both model paths present
+PASS: syntax valid
+PASS: import spec created

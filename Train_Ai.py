@@ -290,6 +290,77 @@ def _to_heatwave_anomaly_labels(
     return events
 
 
+def _finalize_event_labels(
+    event_train_seq,
+    event_val_seq,
+    event_test_seq,
+    threshold_c,
+    min_duration,
+    min_hot_fraction,
+    precomputed_labels=None,
+):
+    """Return event labels while preserving precomputed anomaly labels when provided."""
+    if precomputed_labels is not None:
+        train_labels, val_labels, test_labels = precomputed_labels
+        return (
+            np.asarray(train_labels, dtype=np.int32),
+            np.asarray(val_labels, dtype=np.int32),
+            np.asarray(test_labels, dtype=np.int32),
+        )
+
+    return (
+        _to_heatwave_event_labels(
+            event_train_seq,
+            threshold_c,
+            min_duration=min_duration,
+            min_hot_fraction=min_hot_fraction,
+        ),
+        _to_heatwave_event_labels(
+            event_val_seq,
+            threshold_c,
+            min_duration=min_duration,
+            min_hot_fraction=min_hot_fraction,
+        ),
+        _to_heatwave_event_labels(
+            event_test_seq,
+            threshold_c,
+            min_duration=min_duration,
+            min_hot_fraction=min_hot_fraction,
+        ),
+    )
+
+
+def _resolve_model_identity(model, hp_tuning_used=False):
+    """Resolve stable model metadata from the fitted estimator."""
+    model_cls = model.__class__
+    class_name = model_cls.__name__
+    module_name = model_cls.__module__
+    class_name_lower = class_name.lower()
+    module_name_lower = module_name.lower()
+
+    if "xgbclassifier" in class_name_lower or "xgboost" in module_name_lower:
+        backend_base = "xgboost"
+        model_type = "sklearn_xgboost_classifier"
+    elif class_name_lower.startswith("lgbm") or "lightgbm" in module_name_lower:
+        backend_base = "lightgbm"
+        model_type = "sklearn_lightgbm_classifier"
+    elif "randomforest" in class_name_lower:
+        backend_base = "random_forest"
+        model_type = "sklearn_random_forest_classifier"
+    else:
+        backend_base = "sklearn"
+        model_type = f"sklearn_{class_name_lower}"
+
+    backend = f"{backend_base}_hp_tuned" if hp_tuning_used else backend_base
+    return {
+        "model_type": model_type,
+        "model_backend": backend,
+        "model_backend_base": backend_base,
+        "model_class": class_name,
+        "model_module": module_name,
+    }
+
+
 def _classification_metrics(y_true, y_pred):
     tp = int(np.sum((y_true == 1) & (y_pred == 1)))
     fp = int(np.sum((y_true == 0) & (y_pred == 1)))
@@ -1592,6 +1663,7 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
     y_train_event = None
     y_val_event = None
     y_test_event = None
+    precomputed_event_labels = None
     threshold_selection_mode = f"fixed_{labeling_method}"
     event_min_duration = max(1, int(cfg.get("event_min_duration_days", 3)))
     event_min_hot_fraction = float(cfg.get("event_min_hot_fraction", 0.10))
@@ -1632,6 +1704,9 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
         anomaly_train = y_train_temp - train_climatology_temp[np.newaxis, np.newaxis, :, :]
         anomaly_val = y_val_temp - train_climatology_temp[np.newaxis, np.newaxis, :, :]
         anomaly_test = y_test_temp - train_climatology_temp[np.newaxis, np.newaxis, :, :]
+        event_train_seq = anomaly_train
+        event_val_seq = anomaly_val
+        event_test_seq = anomaly_test
         
         print(f"      [Debug] y_train_temp: {np.nanmean(y_train_temp):.2f}C, clim: {np.nanmean(train_climatology_temp):.2f}C")
         
@@ -1649,6 +1724,7 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
         y_train_event = (train_anomaly_mean >= threshold_val).astype(np.int32)
         y_val_event = (val_anomaly_mean >= threshold_val).astype(np.int32)
         y_test_event = (test_anomaly_mean >= threshold_val).astype(np.int32)
+        precomputed_event_labels = (y_train_event, y_val_event, y_test_event)
         
         print(f"      [Anomaly Label] train: {y_train_event.sum()}/{len(y_train_event)} ({y_train_event.mean()*100:.1f}%), val: {y_val_event.sum()}/{len(y_val_event)}, test: {y_test_event.sum()}/{len(y_test_event)}")
         
@@ -1703,23 +1779,14 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
     else:
         threshold_c = float(cfg.get("heatwave_temperature_threshold", 35.0))
 
-    y_train_event = _to_heatwave_event_labels(
-        event_train_seq,
-        threshold_c,
+    y_train_event, y_val_event, y_test_event = _finalize_event_labels(
+        event_train_seq=event_train_seq,
+        event_val_seq=event_val_seq,
+        event_test_seq=event_test_seq,
+        threshold_c=threshold_c,
         min_duration=event_min_duration,
         min_hot_fraction=event_min_hot_fraction,
-    )
-    y_val_event = _to_heatwave_event_labels(
-        event_val_seq,
-        threshold_c,
-        min_duration=event_min_duration,
-        min_hot_fraction=event_min_hot_fraction,
-    )
-    y_test_event = _to_heatwave_event_labels(
-        event_test_seq,
-        threshold_c,
-        min_duration=event_min_duration,
-        min_hot_fraction=event_min_hot_fraction,
+        precomputed_labels=precomputed_event_labels,
     )
 
     if np.unique(y_train_event).size < 2:
@@ -1788,9 +1855,10 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
             "F1 on those splits will be 0 by definition."
         )
 
-    model_type = "balanced_random_forest"
-    backend = "balanced_rf"
-    print("\n[4/6] Initializing BalancedRandomForestClassifier (CPU)...")
+    model_type = "sklearn_unknown"
+    backend = "sklearn_unknown"
+    model_identity = None
+    print("\n[4/6] Initializing event classifier (CPU)...")
     
     # Hyperparameter tuning if enabled
     hp_results = None
@@ -1858,6 +1926,17 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
                 n_jobs=-1,
                 class_weight='balanced',  # Handle class imbalance
             )
+
+    model_identity = _resolve_model_identity(
+        rf_model,
+        hp_tuning_used=hp_results is not None,
+    )
+    model_type = model_identity["model_type"]
+    backend = model_identity["model_backend"]
+    print(
+        "      Model identity: "
+        f"type={model_type}, backend={backend}, class={model_identity['model_class']}"
+    )
 
     print("\n[5/6] Training + validation metrics...")
     start_time = time.time()
@@ -2016,14 +2095,19 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
 
     checkpoint = {
         "model_type": model_type,
+        "model_backend": backend,
         "sklearn_model": rf_model,
         "metadata": {
+            "model_type": model_type,
             "task_type": "heatwave_event_classification",
             "seq_len": cfg["seq_len"],
             "future_seq": cfg["future_seq"],
             "input_dim": int(x_train.shape[2]),
             "normalization_mean": train_mean.tolist(),
             "normalization_std": train_std.tolist(),
+            "temp_mean": float(temp_mean_scalar),
+            "temp_std": float(temp_std_scalar),
+            "temp_unit": "C",
             "clip_lower": clip_bounds[0].tolist(),
             "clip_upper": clip_bounds[1].tolist(),
             "train_ratio": cfg["train_ratio"],
@@ -2031,6 +2115,7 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
             "labeling_method": labeling_method,
             "heatwave_heat_index_threshold": cfg.get("heatwave_heat_index_threshold"),
             "heatwave_temperature_threshold": cfg.get("heatwave_temperature_threshold"),
+            "heatwave_anomaly_threshold": cfg.get("heatwave_anomaly_threshold"),
             "heatwave_percentile": cfg["heatwave_percentile"],
             "heatwave_threshold_c": threshold_c,
             "threshold_selection_mode": threshold_selection_mode,
@@ -2057,6 +2142,8 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
             "monthly_metrics": monthly_metrics,
             "regional_metrics": regional_metrics,
             "data_quality_report": quality_report,
+            "time_index": [str(ts) for ts in all_times.tolist()] if all_times.size > 0 else [],
+            "data_time_base": str(all_times[-1]) if all_times.size > 0 else None,
             "lats": lats.tolist(),
             "lons": lons.tolist(),
             "rf_n_estimators": cfg["rf_n_estimators"],
@@ -2065,6 +2152,14 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
             "rf_sampling_strategy": cfg["rf_sampling_strategy"],
             "rf_replacement": cfg["rf_replacement"],
             "model_backend": backend,
+            "model_backend_base": model_identity["model_backend_base"] if model_identity else "unknown",
+            "model_backend_requested": cfg.get("model_backend", "balanced_rf"),
+            "model_class": model_identity["model_class"] if model_identity else rf_model.__class__.__name__,
+            "model_module": model_identity["model_module"] if model_identity else rf_model.__class__.__module__,
+            "hp_tuning_enabled": bool(cfg.get("hp_tuning_enabled", False)),
+            "hp_tuning_used": bool(hp_results is not None),
+            "hp_best_params": hp_results.get("best_params") if hp_results else None,
+            "hp_best_score": float(hp_results["best_score"]) if hp_results else None,
             "use_gpu": bool(cfg["use_gpu"]),
             "force_gpu": bool(cfg["force_gpu"]),
             "learning_rate": cfg["learning_rate"],
@@ -2094,6 +2189,7 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
     return {
         "save_path": save_path,
         "model_type": model_type,
+        "model_backend": backend,
         "epochs": 1,
         "batch_size": cfg["batch_size"],
         "learning_rate": cfg["learning_rate"],

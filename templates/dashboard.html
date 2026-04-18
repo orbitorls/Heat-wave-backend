@@ -1,0 +1,967 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Heatwave ML | Live Dashboard</title>
+  <meta name="description" content="Real-time heatwave prediction dashboard for Thailand powered by ConvLSTM / Balanced Random Forest AI.">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:           #060b14;
+      --bg-2:         #0c1424;
+      --surface:      rgba(255,255,255,0.04);
+      --surface-2:    rgba(255,255,255,0.07);
+      --border:       rgba(255,255,255,0.08);
+      --border-accent: rgba(0,212,170,0.35);
+      --accent:       #00d4aa;
+      --accent-dim:   rgba(0,212,170,0.12);
+      --accent-glow:  0 0 24px rgba(0,212,170,0.18);
+      --warning:      #f59e0b;
+      --warning-dim:  rgba(245,158,11,0.12);
+      --danger:       #ef4444;
+      --danger-dim:   rgba(239,68,68,0.12);
+      --info:         #38bdf8;
+      --info-dim:     rgba(56,189,248,0.12);
+      --critical:     #dc2626;
+      --text:         #e2e8f0;
+      --text-muted:   #64748b;
+      --text-dim:     #334155;
+      --font:         'Outfit', sans-serif;
+      --mono:         'JetBrains Mono', monospace;
+      --radius:       14px;
+      --radius-sm:    8px;
+      --sidebar-w:    252px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ─── SIDEBAR ───────────────────────────────────────────────── */
+    .sidebar {
+      width: var(--sidebar-w);
+      background: var(--bg-2);
+      border-right: 1px solid var(--border);
+      padding: 1.5rem 1rem;
+      display: flex;
+      flex-direction: column;
+      position: fixed;
+      height: 100vh;
+      z-index: 100;
+      overflow-y: auto;
+    }
+
+    .sidebar-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0.5rem 0.75rem 1.75rem;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 1.25rem;
+    }
+
+    .sidebar-brand .brand-icon {
+      width: 36px; height: 36px;
+      background: var(--accent-dim);
+      border: 1px solid var(--border-accent);
+      border-radius: 9px;
+      display: grid; place-items: center;
+      font-size: 17px; color: var(--accent);
+    }
+    .sidebar-brand h1 { font-size: 1rem; font-weight: 800; letter-spacing: -0.3px; color: var(--text); line-height: 1.1; }
+    .sidebar-brand span { font-size: 0.65rem; color: var(--text-muted); font-weight: 500; display: block; }
+
+    .nav-section-label {
+      font-size: 0.62rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px;
+      color: var(--text-dim);
+      padding: 0.75rem 0.75rem 0.4rem;
+    }
+
+    .nav-list { list-style: none; display: grid; gap: 2px; margin-bottom: 1rem; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 12px; border-radius: var(--radius-sm);
+      cursor: pointer; font-weight: 600; font-size: 0.875rem;
+      color: var(--text-muted); transition: all 0.15s;
+      text-decoration: none;
+    }
+    .nav-item i { width: 18px; text-align: center; font-size: 0.85rem; }
+    .nav-item:hover { background: var(--surface-2); color: var(--text); }
+    .nav-item.active { background: var(--accent-dim); color: var(--accent); border: 1px solid var(--border-accent); }
+
+    .sidebar-footer { margin-top: auto; padding-top: 1.25rem; border-top: 1px solid var(--border); }
+    .status-indicator {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px; border-radius: var(--radius-sm);
+      background: var(--surface); font-size: 0.75rem; font-weight: 600;
+      color: var(--text-muted);
+    }
+    .status-indicator .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--text-dim); flex-shrink: 0; transition: background 0.3s;
+    }
+    .status-indicator.online .dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+    .status-indicator.offline .dot { background: var(--danger); }
+    .version-badge {
+      display: flex; align-items: center; justify-content: center;
+      gap: 6px; padding: 6px 10px; margin-top: 8px;
+      border-radius: var(--radius-sm);
+      background: var(--surface); border: 1px solid var(--border);
+      font-size: 0.7rem; font-weight: 700; color: var(--text-dim); font-family: var(--mono);
+    }
+
+    /* ─── MAIN CONTENT ──────────────────────────────────────────── */
+    .main-content {
+      margin-left: var(--sidebar-w);
+      flex: 1;
+      padding: 2rem 2.5rem;
+      min-height: 100vh;
+    }
+
+    /* ─── HEADER ────────────────────────────────────────────────── */
+    header {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      margin-bottom: 2rem;
+    }
+    .header-info h2 { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.5px; color: var(--text); }
+    .header-info p { color: var(--text-muted); font-size: 0.875rem; margin-top: 3px; }
+
+    .header-pills { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .pill {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 14px; border-radius: 99px;
+      border: 1px solid var(--border); background: var(--surface);
+      font-size: 0.78rem; font-weight: 700; color: var(--text-muted); white-space: nowrap;
+    }
+    .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+    .pill.danger-pill { border-color: rgba(239,68,68,0.3); }
+    .pill.danger-pill .dot { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+
+    /* ─── KPI GRID ──────────────────────────────────────────────── */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1rem;
+      margin-bottom: 1.75rem;
+    }
+
+    .kpi-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem 1.5rem;
+      position: relative; overflow: hidden;
+      transition: border-color 0.2s, transform 0.2s;
+    }
+    .kpi-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: var(--accent); opacity: 0.5;
+    }
+    .kpi-card.danger::before { background: var(--danger); }
+    .kpi-card.warning::before { background: var(--warning); }
+    .kpi-card:hover { border-color: var(--border-accent); transform: translateY(-2px); }
+
+    .kpi-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.875rem; }
+    .kpi-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+    .kpi-icon { font-size: 0.85rem; color: var(--text-dim); }
+
+    .kpi-value {
+      font-size: 2rem; font-weight: 800; font-family: var(--mono);
+      letter-spacing: -1px; color: var(--text); line-height: 1; margin-bottom: 6px;
+    }
+    .kpi-value.danger-text { color: var(--danger); }
+    .kpi-value.warning-text { color: var(--warning); }
+    .kpi-value.accent-text { color: var(--accent); }
+
+    .kpi-sub { font-size: 0.75rem; color: var(--text-muted); font-weight: 500; display: flex; align-items: center; gap: 5px; }
+    .kpi-sub .up { color: var(--accent); }
+    .kpi-sub .warn { color: var(--warning); }
+    .kpi-sub .danger { color: var(--danger); }
+
+    /* Skeleton shimmer */
+    .skeleton {
+      background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 50%, var(--surface) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.4s infinite;
+      border-radius: 4px; color: transparent !important;
+    }
+    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+    /* ─── MAIN LAYOUT ───────────────────────────────────────────── */
+    .main-layout {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      gap: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+
+    /* ─── PANEL ─────────────────────────────────────────────────── */
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      display: flex; flex-direction: column;
+    }
+    .panel-header {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .panel-header h3 {
+      font-size: 0.9rem; font-weight: 700;
+      display: flex; align-items: center; gap: 9px; color: var(--text);
+    }
+    .panel-header h3 i { color: var(--accent); font-size: 0.85rem; }
+    .panel-body { padding: 1.5rem; flex: 1; overflow: hidden; }
+    .panel-body.forecast-body { 
+      overflow-x: auto; 
+      overflow-y: hidden;
+      max-width: 100%;
+    }
+
+    /* ─── MAP ───────────────────────────────────────────────────── */
+    #liveMap {
+      width: 100%; min-height: 420px; border-radius: calc(var(--radius) - 1px);
+      z-index: 1;
+    }
+    .map-legend {
+      display: flex; gap: 10px; flex-wrap: wrap;
+      padding: 0.75rem 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; color: var(--text-muted); font-weight: 600; }
+    .legend-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+
+    /* ─── QUICK STATS PANEL ─────────────────────────────────────── */
+    .stats-list { display: grid; gap: 0.5rem; }
+    .stat-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-size: 0.875rem;
+      transition: border-color 0.15s;
+    }
+    .stat-row:hover { border-color: var(--border-accent); }
+    .stat-label { color: var(--text-muted); font-weight: 600; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .stat-label i { color: var(--accent); font-size: 0.8rem; width: 14px; text-align: center; }
+    .stat-value { 
+      font-family: var(--mono); 
+      font-weight: 700; 
+      color: var(--text); 
+      font-size: 0.875rem;
+      max-width: 150px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .risk-badge-large {
+      display: flex; align-items: center; justify-content: center;
+      padding: 1rem; margin-bottom: 1rem;
+      border-radius: var(--radius);
+      font-size: 1.1rem; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase;
+      gap: 10px;
+    }
+    .risk-badge-large.low { background: var(--accent-dim); color: var(--accent); border: 1px solid var(--border-accent); }
+    .risk-badge-large.medium { background: var(--info-dim); color: var(--info); border: 1px solid rgba(56,189,248,0.3); }
+    .risk-badge-large.high { background: var(--warning-dim); color: var(--warning); border: 1px solid rgba(245,158,11,0.25); }
+    .risk-badge-large.critical { background: var(--danger-dim); color: var(--danger); border: 1px solid rgba(239,68,68,0.25); }
+
+    .advice-box {
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 0.875rem 1rem;
+      font-size: 0.82rem; line-height: 1.7; color: var(--text-muted);
+      margin-bottom: 1rem;
+    }
+
+    /* ─── FORECAST SECTION ──────────────────────────────────────── */
+    .forecast-section { 
+      margin-bottom: 1.5rem; 
+      width: 100%;
+      overflow: hidden;
+    }
+    .forecast-section .panel {
+      width: 100%;
+      max-width: 100%;
+      overflow: hidden;
+    }
+    .section-title {
+      font-size: 0.9rem; font-weight: 700;
+      display: flex; align-items: center; gap: 9px;
+      color: var(--text); margin-bottom: 1rem;
+    }
+    .section-title i { color: var(--accent); }
+
+    .forecast-grid { 
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 0.5rem;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding: 0.5rem;
+      margin: 0 -0.5rem;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+    }
+
+    .forecast-card {
+      flex: 0 0 auto;
+      width: 100px;
+      min-width: 100px;
+      max-width: 100px;
+      padding: 0.5rem 0.25rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      text-align: center;
+      transition: border-color 0.15s, transform 0.15s;
+      position: relative; 
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 0.15rem;
+    }
+    .forecast-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: var(--accent); opacity: 0.4;
+    }
+    .forecast-card.fc-high::before { background: var(--warning); }
+    .forecast-card.fc-critical::before { background: var(--danger); }
+    .forecast-card:hover { border-color: var(--border-accent); transform: translateY(-2px); }
+
+    .fc-day { font-weight: 700; font-size: 0.7rem; color: var(--text); white-space: nowrap; }
+    .fc-date { font-size: 0.55rem; color: var(--text-muted); white-space: nowrap; }
+    .fc-icon { font-size: 1.2rem; line-height: 1; }
+    .fc-temp { font-size: 1.1rem; font-weight: 700; font-family: var(--mono); line-height: 1; white-space: nowrap; }
+    .fc-prob { font-size: 0.55rem; color: var(--text-muted); font-family: var(--mono); white-space: nowrap; }
+    .fc-risk-badge {
+      font-size: 0.45rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.2px;
+      padding: 1px 4px; border-radius: 99px; display: inline-block;
+      white-space: nowrap;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .fc-risk-badge.low { background: var(--accent-dim); color: var(--accent); border: 1px solid var(--border-accent); }
+    .fc-risk-badge.medium { background: var(--info-dim); color: var(--info); border: 1px solid rgba(56,189,248,0.3); }
+    .fc-risk-badge.high { background: var(--warning-dim); color: var(--warning); border: 1px solid rgba(245,158,11,0.25); }
+    .fc-risk-badge.critical { background: var(--danger-dim); color: var(--danger); border: 1px solid rgba(239,68,68,0.25); }
+
+    /* ─── FOOTER ────────────────────────────────────────────────── */
+    .page-footer {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 1rem 0; border-top: 1px solid var(--border);
+      font-size: 0.75rem; color: var(--text-dim);
+    }
+    .page-footer span i { color: var(--accent); margin-right: 4px; }
+
+    /* ─── SCROLLBAR ──────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--text-dim); border-radius: 5px; }
+
+    /* ─── MAP POPUP ─────────────────────────────────────────────── */
+    .leaflet-popup-content-wrapper {
+      background: var(--bg-2) !important;
+      border: 1px solid var(--border-accent) !important;
+      border-radius: var(--radius-sm) !important;
+      color: var(--text) !important;
+      font-family: var(--font); font-size: 0.82rem;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5) !important;
+    }
+    .leaflet-popup-tip { background: var(--bg-2) !important; }
+    .map-no-data {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 420px; flex-direction: column; gap: 1rem;
+      color: var(--text-muted); font-size: 0.9rem;
+    }
+    .map-no-data i { font-size: 2.5rem; color: var(--text-dim); }
+
+    /* ─── LOADING STATE ──────────────────────────────────────────── */
+    .loading-spinner {
+      display: inline-block; width: 14px; height: 14px;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ─── ERROR BANNER ───────────────────────────────────────────── */
+    .error-banner {
+      display: none; align-items: center; gap: 10px;
+      padding: 10px 14px; border-radius: var(--radius-sm);
+      background: var(--danger-dim); border: 1px solid rgba(239,68,68,0.25);
+      color: var(--danger); font-size: 0.82rem; font-weight: 600;
+      margin-bottom: 1rem;
+    }
+    .error-banner.visible { display: flex; }
+
+    @media (max-width: 1400px) {
+      .forecast-card { width: 95px; min-width: 95px; max-width: 95px; }
+    }
+    @media (max-width: 1200px) {
+      .main-layout { grid-template-columns: 1fr; }
+      .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+      .forecast-card { width: 110px; min-width: 110px; max-width: 110px; }
+    }
+    @media (max-width: 900px) {
+      .forecast-card { width: 100px; min-width: 100px; max-width: 100px; }
+    }
+    @media (max-width: 768px) {
+      :root { --sidebar-w: 0px; }
+      .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+      .forecast-card { width: 90px; min-width: 90px; max-width: 90px; }
+      .fc-temp { font-size: 1rem; }
+    }
+    @media (max-width: 480px) {
+      .forecast-card { width: 80px; min-width: 80px; max-width: 80px; padding: 0.4rem 0.2rem; }
+      .fc-temp { font-size: 0.9rem; }
+      .fc-day { font-size: 0.6rem; }
+      .fc-icon { font-size: 1rem; }
+      .sidebar { display: none; }
+      .main-content { margin-left: 0; padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ═══ SIDEBAR ════════════════════════════════════════════════ -->
+  <nav class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-icon"><i class="fa-solid fa-fire-flame-curved"></i></div>
+      <div>
+        <h1>Heatwave ML</h1>
+        <span>Intelligence Studio</span>
+      </div>
+    </div>
+
+    <p class="nav-section-label">Navigation</p>
+    <ul class="nav-list">
+      <li><a class="nav-item active" href="/dashboard">
+        <i class="fa-solid fa-gauge-high"></i> Live Dashboard
+      </a></li>
+      <li><a class="nav-item" href="/trainer">
+        <i class="fa-solid fa-microchip"></i> Training Studio
+      </a></li>
+    </ul>
+
+    <div class="sidebar-footer">
+      <div class="status-indicator" id="apiStatusIndicator">
+        <div class="dot"></div>
+        API: <span id="apiStatusText">Connecting…</span>
+      </div>
+      <div class="version-badge">
+        <i class="fa-solid fa-code-branch" style="color:var(--accent);font-size:0.65rem"></i>
+        V3.5 Engine
+      </div>
+    </div>
+  </nav>
+
+  <!-- ═══ MAIN CONTENT ═══════════════════════════════════════════ -->
+  <div class="main-content">
+
+    <div class="error-banner" id="errorBanner">
+      <i class="fa-solid fa-triangle-exclamation"></i>
+      <span id="errorMsg">Unable to connect to API</span>
+    </div>
+
+    <!-- Header -->
+    <header>
+      <div class="header-info">
+        <h2>Live Prediction Dashboard</h2>
+        <p>Real-time heatwave analysis over Thailand — powered by <span id="modelTypeLabel">—</span></p>
+      </div>
+      <div class="header-pills">
+        <div class="pill" id="riskPill">
+          <div class="dot" id="riskDot"></div>
+          Risk: <span id="riskLevelLabel">—</span>
+        </div>
+        <div class="pill">
+          <div class="dot" style="background:var(--info)"></div>
+          Updated: <span id="lastUpdated">—</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- KPI Grid -->
+    <section class="kpi-grid">
+      <div class="kpi-card" id="kpiMaxTempCard">
+        <div class="kpi-header">
+          <span class="kpi-label">Max Temperature</span>
+          <i class="fa-solid fa-temperature-high kpi-icon"></i>
+        </div>
+        <div class="kpi-value skeleton" id="kpiMaxTemp">—</div>
+        <div class="kpi-sub"><i class="fa-solid fa-map-marker-alt up"></i> Peak across Thailand</div>
+      </div>
+      <div class="kpi-card" id="kpiMeanTempCard">
+        <div class="kpi-header">
+          <span class="kpi-label">Mean Temperature</span>
+          <i class="fa-solid fa-thermometer-half kpi-icon"></i>
+        </div>
+        <div class="kpi-value skeleton" id="kpiMeanTemp">—</div>
+        <div class="kpi-sub"><span class="up"><i class="fa-solid fa-chart-area"></i></span> Spatial Average</div>
+      </div>
+      <div class="kpi-card" id="kpiProbCard">
+        <div class="kpi-header">
+          <span class="kpi-label">Heatwave Probability</span>
+          <i class="fa-solid fa-percent kpi-icon"></i>
+        </div>
+        <div class="kpi-value skeleton" id="kpiProb">—</div>
+        <div class="kpi-sub"><span class="up"><i class="fa-solid fa-brain"></i></span> Model confidence</div>
+      </div>
+      <div class="kpi-card" id="kpiMinTempCard">
+        <div class="kpi-header">
+          <span class="kpi-label">Min Temperature</span>
+          <i class="fa-solid fa-snowflake kpi-icon"></i>
+        </div>
+        <div class="kpi-value skeleton" id="kpiMinTemp">—</div>
+        <div class="kpi-sub"><span class="neutral"><i class="fa-solid fa-wind"></i></span> Coolest region</div>
+      </div>
+    </section>
+
+    <!-- Map + Quick Stats -->
+    <div class="main-layout">
+
+      <!-- Map Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <h3><i class="fa-solid fa-map"></i> Spatial Heatmap — Thailand</h3>
+          <div class="loading-spinner" id="mapSpinner"></div>
+        </div>
+        <div id="liveMap"></div>
+        <div class="map-legend">
+          <div class="legend-item"><div class="legend-swatch" style="background:#22c55e"></div> Low (&lt;35°C)</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#38bdf8"></div> Moderate (35–38°C)</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#f59e0b"></div> High (38–41°C)</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:#ef4444"></div> Critical (&gt;41°C)</div>
+        </div>
+      </div>
+
+      <!-- Quick Stats Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <h3><i class="fa-solid fa-chart-pie"></i> Current Conditions</h3>
+        </div>
+        <div class="panel-body">
+          <div class="risk-badge-large low" id="currentRiskBadge">
+            <i class="fa-solid fa-circle-info"></i>
+            <span id="currentRiskText">Loading…</span>
+          </div>
+
+          <div class="advice-box" id="adviceBox">
+            Fetching latest model advice…
+          </div>
+
+          <div class="stats-list">
+            <div class="stat-row">
+              <span class="stat-label"><i class="fa-solid fa-temperature-high"></i> T2M Max</span>
+              <span class="stat-value" id="statTMax">—</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label"><i class="fa-solid fa-thermometer-half"></i> T2M Mean</span>
+              <span class="stat-value" id="statTMean">—</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label"><i class="fa-solid fa-snowflake"></i> T2M Min</span>
+              <span class="stat-value" id="statTMin">—</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label"><i class="fa-solid fa-percent"></i> HW Probability</span>
+              <span class="stat-value" id="statProb">—</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label"><i class="fa-solid fa-robot"></i> Model Type</span>
+              <span class="stat-value" id="statModel">—</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label"><i class="fa-solid fa-triangle-exclamation"></i> Anomaly</span>
+              <span class="stat-value" id="statAnomaly">—</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label"><i class="fa-solid fa-calendar-day"></i> Date</span>
+              <span class="stat-value" id="statDate">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 7-Day Forecast -->
+    <section class="forecast-section">
+      <div class="panel">
+        <div class="panel-header">
+          <h3><i class="fa-solid fa-cloud-sun"></i> 7-Day Autoregressive Forecast</h3>
+          <div class="loading-spinner" id="forecastSpinner"></div>
+        </div>
+        <div class="panel-body forecast-body">
+          <div class="forecast-grid" id="forecastGrid">
+            <!-- Skeleton cards while loading -->
+            <div class="forecast-card"><div class="fc-day skeleton">Mon</div><div class="fc-temp skeleton">—</div></div>
+            <div class="forecast-card"><div class="fc-day skeleton">Tue</div><div class="fc-temp skeleton">—</div></div>
+            <div class="forecast-card"><div class="fc-day skeleton">Wed</div><div class="fc-temp skeleton">—</div></div>
+            <div class="forecast-card"><div class="fc-day skeleton">Thu</div><div class="fc-temp skeleton">—</div></div>
+            <div class="forecast-card"><div class="fc-day skeleton">Fri</div><div class="fc-temp skeleton">—</div></div>
+            <div class="forecast-card"><div class="fc-day skeleton">Sat</div><div class="fc-temp skeleton">—</div></div>
+            <div class="forecast-card"><div class="fc-day skeleton">Sun</div><div class="fc-temp skeleton">—</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="page-footer">
+      <span><i class="fa-solid fa-fire-flame-curved"></i> Heatwave ML Intelligence Studio — Thailand ERA5 Pipeline</span>
+      <span id="footerRefresh">Auto-refresh every 60s</span>
+    </footer>
+
+  </div><!-- /main-content -->
+
+  <script>
+    // ════════════════════════════════════════════════════════════
+    //  UTILITIES
+    // ════════════════════════════════════════════════════════════
+    const $ = id => document.getElementById(id);
+    const fmt1 = v => (v != null && !isNaN(v)) ? Number(v).toFixed(1) : '—';
+    const fmtC = v => {
+      const t = fmt1(v);
+      return t === '—' ? t : `${t} °C`;
+    };
+    const normalizeProbability = v => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return null;
+      if (n > 1) return Math.max(0, Math.min(1, n / 100));
+      return Math.max(0, Math.min(1, n));
+    };
+    const fmtPct = v => {
+      const p = normalizeProbability(v);
+      return p == null ? '—' : (p * 100).toFixed(1) + '%';
+    };
+    const timeNow = () => new Date().toLocaleTimeString('en-US', { hour12: false });
+
+    function setError(msg) {
+      $('errorBanner').classList.add('visible');
+      $('errorMsg').textContent = msg || 'API connection failed';
+    }
+    function clearError() { $('errorBanner').classList.remove('visible'); }
+
+    function riskColorMap(risk) {
+      switch ((risk || '').toUpperCase()) {
+        case 'CRITICAL': return { css: 'critical', color: '#ef4444', iconColor: 'var(--danger)', tempColor: 'danger-text', cardClass: 'danger' };
+        case 'HIGH':     return { css: 'high',     color: '#f59e0b', iconColor: 'var(--warning)', tempColor: 'warning-text', cardClass: 'warning' };
+        case 'MEDIUM':   return { css: 'medium',   color: '#38bdf8', iconColor: 'var(--info)',    tempColor: 'accent-text',  cardClass: '' };
+        default:         return { css: 'low',      color: '#00d4aa', iconColor: 'var(--accent)',  tempColor: 'accent-text',  cardClass: '' };
+      }
+    }
+
+    function resetRiskClasses(el, classes) {
+      if (!el) return;
+      classes.forEach(cls => el.classList.remove(cls));
+    }
+
+    function normalizeRiskCode(raw) {
+      if (raw == null) return null;
+      const n = Number(raw);
+      if (Number.isInteger(n) && n >= 0 && n <= 3) {
+        return ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'][n];
+      }
+
+      const txt = String(raw).trim().toUpperCase();
+      if (!txt) return null;
+      if (['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].includes(txt)) return txt;
+      if (['NORMAL'].includes(txt)) return 'LOW';
+      if (['CAUTION', 'MODERATE', 'MED'].includes(txt)) return 'MEDIUM';
+      if (['WARNING'].includes(txt)) return 'HIGH';
+      if (['DANGER', 'SEVERE', 'EXTREME'].includes(txt)) return 'CRITICAL';
+      return null;
+    }
+
+    function resolveFeatureRisk(properties = {}) {
+      const code =
+        normalizeRiskCode(properties.risk_code) ||
+        normalizeRiskCode(properties.risk_level) ||
+        normalizeRiskCode(properties.risk_label) ||
+        'LOW';
+
+      return {
+        code,
+        label: code.charAt(0) + code.slice(1).toLowerCase(),
+      };
+    }
+
+    function resolveFeatureTemperature(properties = {}) {
+      const candidates = [
+        properties.temperature,
+        properties.temperature_c,
+        properties.t2m_max,
+        properties.t2m,
+        properties.T2M_MAX,
+        properties.T2M,
+      ];
+
+      for (const value of candidates) {
+        const n = Number(value);
+        if (Number.isFinite(n)) return n;
+      }
+      return null;
+    }
+
+    function riskIcon(risk) {
+      switch ((risk || '').toUpperCase()) {
+        case 'CRITICAL': return '<i class="fa-solid fa-skull-crossbones" style="color:#ef4444"></i>';
+        case 'HIGH':     return '<i class="fa-solid fa-circle-exclamation" style="color:#f59e0b"></i>';
+        case 'MEDIUM':   return '<i class="fa-solid fa-sun" style="color:#38bdf8"></i>';
+        default:         return '<i class="fa-solid fa-leaf" style="color:#00d4aa"></i>';
+      }
+    }
+
+    function removeSkeleton(el) {
+      if (el) el.classList.remove('skeleton');
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  HEALTH CHECK
+    // ════════════════════════════════════════════════════════════
+    async function checkHealth() {
+      try {
+        const r = await fetch('/api/health');
+        const d = await r.json();
+        const ind = $('apiStatusIndicator');
+        if (d.status === 'ok') {
+          ind.classList.add('online'); ind.classList.remove('offline');
+          $('apiStatusText').textContent = d.model_loaded ? 'Online' : 'No Model';
+          clearError();
+          return d.model_loaded;
+        }
+      } catch(e) {
+        $('apiStatusIndicator').classList.add('offline');
+        $('apiStatusText').textContent = 'Offline';
+        setError('Backend unreachable — is api_server.py running?');
+      }
+      return false;
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  PREDICT (current conditions)
+    // ════════════════════════════════════════════════════════════
+    async function loadPredict() {
+      try {
+        const r = await fetch('/api/predict');
+        if (!r.ok) { console.warn('predict non-ok', r.status); return; }
+        const d = await r.json();
+        if (d.error) { console.warn('predict error', d.error); return; }
+
+        const risk  = d.risk_level || 'LOW';
+        const rm    = riskColorMap(risk);
+        const prob  = normalizeProbability(d.probability);
+        const wx    = d.weather || {};
+
+        const maxT  = wx.T2M_MAX;
+        const meanT = wx.T2M;
+        const minT  = wx.T2M_MIN;
+
+        // KPI bar
+        resetRiskClasses($('kpiMaxTemp'), ['danger-text', 'warning-text', 'accent-text']);
+        resetRiskClasses($('kpiMaxTempCard'), ['danger', 'warning']);
+        resetRiskClasses($('kpiProb'), ['danger-text', 'warning-text', 'accent-text']);
+        resetRiskClasses($('riskPill'), ['danger-pill']);
+
+        $('kpiMaxTemp').textContent = fmtC(maxT);
+        removeSkeleton($('kpiMaxTemp'));
+        if (['HIGH','CRITICAL'].includes(risk)) {
+          $('kpiMaxTemp').classList.add(rm.tempColor);
+          $('kpiMaxTempCard').classList.add(rm.cardClass);
+        }
+
+        $('kpiMeanTemp').textContent = fmtC(meanT);
+        removeSkeleton($('kpiMeanTemp'));
+
+        $('kpiProb').textContent = fmtPct(prob);
+        removeSkeleton($('kpiProb'));
+        if (prob > 0.85) $('kpiProb').classList.add('danger-text');
+        else if (prob > 0.6) $('kpiProb').classList.add('warning-text');
+
+        $('kpiMinTemp').textContent = fmtC(minT);
+        removeSkeleton($('kpiMinTemp'));
+
+        // Risk pill
+        $('riskLevelLabel').textContent = risk;
+        $('riskDot').style.background = rm.color;
+        if (['HIGH','CRITICAL'].includes(risk)) $('riskPill').classList.add('danger-pill');
+
+        // Risk badge
+        const rb = $('currentRiskBadge');
+        rb.className = 'risk-badge-large ' + rm.css;
+        $('currentRiskText').textContent = risk + ' RISK';
+
+        // Advice
+        $('adviceBox').textContent = d.advice || '—';
+
+        // Stats side panel
+        $('statTMax').textContent   = fmtC(maxT);
+        $('statTMean').textContent  = fmtC(meanT);
+        $('statTMin').textContent   = fmtC(minT);
+        $('statProb').textContent   = fmtPct(prob);
+        $('statModel').textContent  = d.model_type || '—';
+        $('statAnomaly').textContent= d.anomaly?.is_anomaly ? '⚠ YES — ' + (d.anomaly.severity || '') : 'No';
+        $('statDate').textContent   = d.date || '—';
+
+        // Header
+        $('modelTypeLabel').textContent = d.model_type || '—';
+        $('lastUpdated').textContent = timeNow();
+
+      } catch(e) { console.error('loadPredict error', e); }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  FORECAST
+    // ════════════════════════════════════════════════════════════
+    const ICONS = {
+      LOW:      '🌿',
+      MEDIUM:   '☀️',
+      HIGH:     '🔥',
+      CRITICAL: '🌡️',
+    };
+
+    async function loadForecast() {
+      $('forecastSpinner').style.display = 'inline-block';
+      try {
+        const r = await fetch('/api/forecast');
+        if (!r.ok) { $('forecastSpinner').style.display = 'none'; return; }
+        const d = await r.json();
+        if (d.error || !d.forecasts) { $('forecastSpinner').style.display = 'none'; return; }
+
+        const grid = $('forecastGrid');
+        grid.innerHTML = '';
+        d.forecasts.forEach(fc => {
+          const risk = fc.risk_level || 'LOW';
+          const rm   = riskColorMap(risk);
+          const tMax = fc.weather?.T2M_MAX ?? fc.weather?.T2M;
+          const prob = normalizeProbability(fc.probability);
+          const icon = ICONS[risk.toUpperCase()] || '🌡️';
+
+          const card = document.createElement('div');
+          card.className = 'forecast-card' + (risk === 'CRITICAL' ? ' fc-critical' : risk === 'HIGH' ? ' fc-high' : '');
+          card.innerHTML = `
+            <div class="fc-day">${fc.day_name || fc.day}</div>
+            <div class="fc-date">${fc.date || ''}</div>
+            <div class="fc-icon">${icon}</div>
+            <div class="fc-temp" style="color:${rm.color}">${fmtC(tMax)}</div>
+            <div class="fc-prob">${fmtPct(prob)}</div>
+            <span class="fc-risk-badge ${rm.css}">${risk}</span>
+          `;
+          grid.appendChild(card);
+        });
+      } catch(e) { console.error('loadForecast error', e); }
+      $('forecastSpinner').style.display = 'none';
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  LEAFLET MAP
+    // ════════════════════════════════════════════════════════════
+    let leafletMap = null;
+    let geoLayer   = null;
+
+    function initMap() {
+      leafletMap = L.map('liveMap', {
+        center: [13.0, 101.5],
+        zoom: 5,
+        zoomControl: true,
+        attributionControl: false,
+      });
+
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        maxZoom: 18, subdomains: 'abcd',
+      }).addTo(leafletMap);
+    }
+
+    function tempToColor(t) {
+      if (t >= 41) return '#ef4444';         // critical
+      if (t >= 38) return '#f59e0b';         // high
+      if (t >= 35) return '#38bdf8';         // medium
+      return '#22c55e';                      // low
+    }
+
+    async function loadMap() {
+      $('mapSpinner').style.display = 'inline-block';
+      try {
+        const r = await fetch('/api/map');
+        if (!r.ok) { $('mapSpinner').style.display = 'none'; return; }
+        const geojson = await r.json();
+        if (!geojson.features?.length) { $('mapSpinner').style.display = 'none'; return; }
+
+        if (geoLayer) { geoLayer.remove(); }
+
+        geoLayer = L.geoJSON(geojson, {
+          style: feature => {
+            const t = resolveFeatureTemperature(feature.properties) ?? 0;
+            return {
+              fillColor: tempToColor(t),
+              fillOpacity: 0.55,
+              color: tempToColor(t),
+              weight: 0.3,
+              opacity: 0.4,
+            };
+          },
+          onEachFeature: (feature, layer) => {
+            const t = resolveFeatureTemperature(feature.properties);
+            const risk = resolveFeatureRisk(feature.properties);
+            layer.bindPopup(`
+              <strong style="color:var(--accent)">${fmtC(t)}</strong><br>
+              Risk: <strong>${risk.label}</strong>
+            `, { className: '' });
+          }
+        }).addTo(leafletMap);
+
+        // Fit map to data bounds
+        try { leafletMap.fitBounds(geoLayer.getBounds(), { padding: [20, 20] }); }
+        catch(e) {}
+
+      } catch(e) { console.error('loadMap error', e); }
+      $('mapSpinner').style.display = 'none';
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  INIT & REFRESH LOOP
+    // ════════════════════════════════════════════════════════════
+    async function refreshAll() {
+      const modelLoaded = await checkHealth();
+      if (modelLoaded) {
+        loadPredict();
+        loadForecast();
+        loadMap();
+      } else {
+        // Model not loaded — still show forecast if possible
+        loadForecast();
+      }
+    }
+
+    // Initial load
+    initMap();
+    refreshAll();
+
+    // Auto-refresh every 60 seconds
+    setInterval(refreshAll, 60_000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+Testing backward compatibility with normalize=True...
+2026-03-07 14:11:56,349 - heatwave - INFO - Loading 32 files from era5_data...
+2026-03-07 14:12:01,456 - heatwave - INFO - Preparing training data (dynamic + static channels)...
+2026-03-07 14:12:02,763 - heatwave - WARNING - Variable tp not found, filling with zeros.
+2026-03-07 14:12:02,774 - heatwave - WARNING - Variable humidity not found, filling with zeros.
+t2m normalized mean: 0.0002
+PASS: backward compat with normalize=True works
+data.shape: (5844, 8, 65, 37)
+mean.shape: (1, 8, 1, 1)
+std.shape: (1, 8, 1, 1)

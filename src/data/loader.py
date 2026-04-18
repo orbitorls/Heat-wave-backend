@@ -308,53 +308,6 @@ class DataLoader:
         logger.info(f"Combined dataset variables: {list(combined.data_vars)}")
         
         return combined
-        """Load and merge ERA5 datasets lazily."""
-        files = self._select_nc_files(year=year)
-        
-        if not files:
-            raise FileNotFoundError(f"No NetCDF files found in {self.data_dir}")
-
-        logger.info(f"Loading {len(files)} files from {self.data_dir}...")
-        
-        datasets = []
-        skipped = 0
-        for f in sorted(files):
-            try:
-                # Attempt to open with chunks (lazy), fallback to eager if dask fails
-                try:
-                    ds = xr.open_dataset(f, chunks={"time": 24})
-                except (ImportError, Exception):
-                    ds = xr.open_dataset(f)
-                
-                processed = self._preprocess_ds(ds)
-                if processed.dims:
-                    datasets.append(processed)
-                else:
-                    skipped += 1
-            except Exception as e:
-                logger.error(f"Error processing {f.name}: {e}")
-                skipped += 1
-
-        if not datasets:
-            raise ValueError("No valid data could be processed.")
-        if skipped > 0:
-            logger.warning(f"Skipped {skipped} file(s) due to incompatible schema or empty crop.")
-
-        # Merge all datasets
-        full_ds = xr.concat(
-            datasets,
-            dim="time",
-            data_vars="minimal",
-            coords="minimal",
-            compat="override",
-            join="outer",
-        ).sortby("time")
-        
-        # Remove duplicates
-        _, index = np.unique(full_ds.time, return_index=True)
-        full_ds = full_ds.isel(time=np.sort(index))
-        
-        return full_ds
 
     def prepare_training_data(self, ds: xr.Dataset, fill_nan: bool = True, 
                                variable_specs: Optional[List[Tuple[str, List[str]]]] = None) -> Tuple[np.ndarray, Dict]:

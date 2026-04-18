@@ -1,0 +1,15 @@
+C:\Users\User\AppData\Roaming\Python\Python312\site-packages\torch\cuda\__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+Loading model from models\heatwave_model_checkpoint_v60.pth...
+Loading data...
+2026-04-11 15:29:03,051 - heatwave - INFO - Loading 67 files from era5_data...
+2026-04-11 15:29:55,385 - heatwave - WARNING - Skipped 35 file(s) due to incompatible schema or empty crop.
+2026-04-11 15:29:56,465 - heatwave - INFO - Preparing training data (dynamic + static channels)...
+2026-04-11 15:29:56,915 - heatwave - WARNING - Variable tp not found, filling with zeros.
+2026-04-11 15:29:56,925 - heatwave - WARNING - Variable humidity not found, filling with zeros.
+Spatial grid mismatch between checkpoint and runtime data. Regridding API data from (65 lat, 37 lon) to (65 lat, 44 lon).
+Loaded 876 test samples.
+Model loaded successfully.
+ * Serving Flask app 'api_server'
+ * Debug mode: off
+An attempt was made to access a socket in a way forbidden by its access permissions

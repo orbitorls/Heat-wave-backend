@@ -1,0 +1,134 @@
+{
+  "days": 7,
+  "forecasts": [
+    {
+      "advice": "Generated from balanced_random_forest autoregressive forecast",
+      "date": "2026-03-08",
+      "day": 1,
+      "day_name": "Sun",
+      "probability": 0.041111111111111105,
+      "risk_label": "LOW",
+      "risk_level": "LOW",
+      "weather": {
+        "NDVI": null,
+        "PRECTOTCORR": null,
+        "RH2M": null,
+        "T2M": 26.196209666040012,
+        "T2M_MAX": 31.300927734375023,
+        "T2M_MIN": 14.624688720703148,
+        "WS10M": null
+      }
+    },
+    {
+      "advice": "Generated from balanced_random_forest autoregressive forecast",
+      "date": "2026-03-09",
+      "day": 2,
+      "day_name": "Mon",
+      "probability": 0.051666666666666666,
+      "risk_label": "LOW",
+      "risk_level": "LOW",
+      "weather": {
+        "NDVI": null,
+        "PRECTOTCORR": null,
+        "RH2M": null,
+        "T2M": 26.196209666040012,
+        "T2M_MAX": 31.300927734375023,
+        "T2M_MIN": 14.624688720703148,
+        "WS10M": null
+      }
+    },
+    {
+      "advice": "Generated from balanced_random_forest autoregressive forecast",
+      "date": "2026-03-10",
+      "day": 3,
+      "day_name": "Tue",
+      "probability": 0.04722222222222222,
+      "risk_label": "LOW",
+      "risk_level": "LOW",
+      "weather": {
+        "NDVI": null,
+        "PRECTOTCORR": null,
+        "RH2M": null,
+        "T2M": 26.196209666040012,
+        "T2M_MAX": 31.300927734375023,
+        "T2M_MIN": 14.624688720703148,
+        "WS10M": null
+      }
+    },
+    {
+      "advice": "Generated from balanced_random_forest autoregressive forecast",
+      "date": "2026-03-11",
+      "day": 4,
+      "day_name": "Wed",
+      "probability": 0.048888888888888885,
+      "risk_label": "LOW",
+      "risk_level": "LOW",
+      "weather": {
+        "NDVI": null,
+        "PRECTOTCORR": null,
+        "RH2M": null,
+        "T2M": 26.196209666040012,
+        "T2M_MAX": 31.300927734375023,
+        "T2M_MIN": 14.624688720703148,
+        "WS10M": null
+      }
+    },
+    {
+      "advice": "Generated from balanced_random_forest autoregressive forecast",
+      "date": "2026-03-12",
+      "day": 5,
+      "day_name": "Thu",
+      "probability": 0.057222222222222216,
+      "risk_label": "LOW",
+      "risk_level": "LOW",
+      "weather": {
+        "NDVI": null,
+        "PRECTOTCORR": null,
+        "RH2M": null,
+        "T2M": 26.196209666040012,
+        "T2M_MAX": 31.300927734375023,
+        "T2M_MIN": 14.624688720703148,
+        "WS10M": null
+      }
+    },
+    {
+      "advice": "Generated from balanced_random_forest autoregressive forecast",
+      "date": "2026-03-13",
+      "day": 6,
+      "day_name": "Fri",
+      "probability": 0.07222222222222222,
+      "risk_label": "LOW",
+      "risk_level": "LOW",
+      "weather": {
+        "NDVI": null,
+        "PRECTOTCORR": null,
+        "RH2M": null,
+        "T2M": 26.196209666040012,
+        "T2M_MAX": 31.300927734375023,
+        "T2M_MIN": 14.624688720703148,
+        "WS10M": null
+      }
+    },
+    {
+      "advice": "Generated from balanced_random_forest autoregressive forecast",
+      "date": "2026-03-14",
+      "day": 7,
+      "day_name": "Sat",
+      "probability": 0.07444444444444444,
+      "risk_label": "LOW",
+      "risk_level": "LOW",
+      "weather": {
+        "NDVI": null,
+        "PRECTOTCORR": null,
+        "RH2M": null,
+        "T2M": 26.196209666040012,
+        "T2M_MAX": 31.300927734375023,
+        "T2M_MIN": 14.624688720703148,
+        "WS10M": null
+      }
+    }
+  ],
+  "generated_at": "2026-03-07T14:47:23.990255",
+  "model_type": "balanced_random_forest",
+  "status": "ok"
+}

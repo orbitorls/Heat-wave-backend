@@ -1,0 +1,15 @@
+C:\Users\User\AppData\Roaming\Python\Python312\site-packages\torch\cuda\__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+usage: Train_Ai.py [-h] [--seq-len SEQ_LEN] [--future-seq FUTURE_SEQ]
+                   [--train-ratio TRAIN_RATIO] [--val-ratio VAL_RATIO]
+                   [--test-ratio TEST_RATIO] [--n-estimators N_ESTIMATORS]
+                   [--max-depth MAX_DEPTH]
+                   [--min-samples-leaf MIN_SAMPLES_LEAF] [--hp-tuning]
+                   [--hp-n-iter HP_N_ITER] [--hp-cv-folds HP_CV_FOLDS]
+                   [--walk-forward] [--folds FOLDS] [--expand-window]
+                   [--feature-eng] [--spatial-features] [--temporal-features]
+                   [--interaction-features] [--min-recall MIN_RECALL]
+                   [--max-far MAX_FAR] [--temp-threshold TEMP_THRESHOLD]
+                   [--min-duration MIN_DURATION]
+                   [--labeling {temperature,heat_index}] [--seed SEED]
+Train_Ai.py: error: argument --max-depth: invalid int value: 'None'

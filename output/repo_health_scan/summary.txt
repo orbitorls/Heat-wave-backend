@@ -1,0 +1,5 @@
+Actionable next steps:
+- Convert requirements.txt from UTF-16 LE to UTF-8 (create a UTF-8 copy and test installation). 
+- Add missing ignores to .gitignore: era5_data/, models/, *.pth, *.nc to avoid accidentally tracking large or sensitive artifacts.
+- Investigate tracked-but-missing paths (e.g., era5_data/*.nc) and remove or re-add them correctly; consider using git-lfs for large binary files.
+- Run a dedicated secrets scanner (truffleHog, git-secrets, or detect-secrets) across history and working tree to validate absence of credentials.

@@ -1,0 +1,68 @@
+C:\Users\User\AppData\Roaming\Python\Python312\site-packages\torch\cuda\__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+============================================================
+HEATWAVE PREDICTION MODEL TRAINING
+============================================================
+Sequence Length: 3 days
+Forecast Horizon: 2 days
+Random Forest: n_estimators=400, max_depth=30
+HP Tuning: Disabled
+Walk-Forward CV: Disabled
+Feature Engineering: Disabled
+============================================================
+Starting Heatwave AI Training...
+Random seed set to 42 for reproducibility
+Config: seq=3, future=2, rf_trees=400, depth=30, backend=balanced_rf, gpu=False, force_gpu=False, labeling=anomaly, sampling=all, clip=(0.5,99.5)
+
+[1/6] Loading ERA5 Data using new DataLoader...
+      Loading combined ERA5 + NASA POWER data...
+2026-04-10 19:33:03,674 - heatwave - INFO - Loading 67 files from D:\Heat-wave-backend\era5_data...
+2026-04-10 19:33:53,681 - heatwave - WARNING - Skipped 35 file(s) due to incompatible schema or empty crop.
+2026-04-10 19:33:54,704 - heatwave - INFO - Loading 35 NASA POWER files...
+2026-04-10 19:34:22,615 - heatwave - INFO - Merging ERA5 and NASA POWER datasets...
+2026-04-10 19:34:22,615 - heatwave - INFO - Renamed NASA POWER variables: {'T2M': 't2m_power', 'RH2M': 'humidity', 'PRECTOTCORR': 'tp', 'T2MDEW': 'd2m'}
+2026-04-10 19:34:25,067 - heatwave - INFO - Combined dataset variables: ['t2m', 'swvl1', 'z', 'tp', 'humidity', 'd2m', 't2m_power', 'WS10M', 'PS']
+2026-04-10 19:34:25,074 - heatwave - INFO - Preparing training data (dynamic + static channels)...
+      Available dynamic variables: ['z', 't2m', 'swvl1', 'tp', 'humidity']
+      Missing dynamic variables: []
+      Data quality: missing_dynamic=0 near_zero_std_channels=0
+      Normalized Data Shape: (18627, 8, 65, 44)
+
+[2/6] Temporal split (train/val/test)...
+      Filling NaN values within each split (causal)...
+      Split config: train=75%, val=10%, test=15% | Total timesteps: 18627
+      Sample counts: 13970/1862/2795
+      Applying clipping: [0.5%, 99.5%] percentiles
+      Normalization computed from 13970 training timesteps.
+      Samples train/val/test: 13966/1858/2791
+      Using anomaly-based labeling (threshold: 6.0 degrees above normal)
+      [Debug] y_train_temp: 63.48C, clim: 63.46C
+      Anomaly config: threshold=62.95C (top 15%)
+      [Anomaly Label] train: 2096/13966 (15.0%), val: 500/1858, test: 1110/2791
+Unable to derive both classes from event thresholds. Falling back to sample-mean based labels (top 10% hottest samples).
+      Heatwave threshold (selected): 126.56 C
+      Threshold selection mode: anomaly_sample_mean_fallback
+      Positive rate train/val/test: 0.100/0.191/0.301
+
+[4/6] Initializing BalancedRandomForestClassifier (CPU)...
+
+[5/6] Training + validation metrics...
+      Prob Threshold: 0.360 (validation_f1_search) |       Train Brier: 0.007363 | Val Brier: 0.063337 | Val PR-AUC: 0.846028995601399 | Val Event F1: 0.7848 | Val Recall: 0.8192
+
+[6/6] Test evaluation + baseline comparison + checkpoint save...
+Training completed in 28.47 seconds.
+Test Brier: 0.076863 | PR-AUC: 0.9125836691883265 | Event F1: 0.8347 | Hit Rate: 0.8536 | False Alarm: 0.0825
+Seasonal F1: {'cool_dry': 0.7333333333333334, 'hot_dry': 0.9120689655172414, 'rainy': 0.6704545454545455}
+Regional F1: {'south': 0.39226033421284084, 'central': 0.39226033421284084, 'north': 0.39226033421284084}
+Model checkpoint saved to: models\heatwave_model_checkpoint_v58.pth
+
+[Report] Generating training report...
+      Training report saved: output\training_report_20260410_193507.png
+
+============================================================
+TRAINING COMPLETED SUCCESSFULLY
+============================================================
+Model saved to: models\heatwave_model_checkpoint_v58.pth
+Test F1: 0.8347
+Test Precision: 0.8166
+Test Recall: 0.8536

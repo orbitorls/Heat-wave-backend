@@ -1,0 +1,43 @@
+data:
+  labeling_method: "heat_index"
+  heatwave_heat_index_threshold: 41.0
+  heatwave_temperature_threshold: 35.0
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  event_min_duration_days: 3
+  event_min_hot_fraction: 0.10
+  require_dynamic_features: true
+  allow_sample_mean_fallback: false
+  min_train_positive_rate: 0.01
+  max_train_positive_rate: 0.35
+  min_eval_positive_count: 10
+
+model:
+  model_backend: "balanced_rf"
+  rf_n_estimators: 300
+  rf_max_depth: 20
+  rf_min_samples_leaf: 2
+  rf_sampling_strategy: "all"
+  rf_replacement: true
+  learning_rate: 0.001
+  epochs: 20
+  batch_size: 4
+  seq_len: 7
+  future_seq: 2
+  clip_low_percentile: 0.5
+  clip_high_percentile: 99.5
+
+ndvi:
+  enabled: false
+  gee_project: "gen-lang-client-0381821743"
+  start_year: 2000
+  end_year: 2015
+  output_dir: "data/ndvi/"
+  processed_file: "data/ndvi/ndvi_aligned_era5.nc"
+  lag_months: [0, 1, 2]
+
+api:
+  host: "0.0.0.0"
+  port: 5000
+  debug: false

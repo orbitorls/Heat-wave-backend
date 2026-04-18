@@ -1,0 +1,2 @@
+PASS: output shape = torch.Size([2, 2, 6, 16, 16])
+PASS: loss=1.0306, mse=1.0306, phy=0.0001

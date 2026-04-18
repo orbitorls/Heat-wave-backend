@@ -1,0 +1,6 @@
+PASS T4: clean_data imported
+PASS T4: clean_data called in source
+PASS T5: Fake boost removed, split updated to 0.85
+PASS T6: function signature correct: ['max_temp', 'model_probability']
+PASS T7: All dummy values removed
+PASS: api_server.py syntax valid

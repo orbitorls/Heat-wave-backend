@@ -1,0 +1,12 @@
+=== Split Ratio Baseline ===
+
+Training (Train_Ai.py):
+  Line 64: TRAIN_RATIO = 0.7 (70% train, 15% val, 15% test — temporal split)
+  Function: temporal_split_data(data, train_ratio=0.7, val_ratio=0.15)
+
+Inference (api_server.py):
+  No explicit split found in api_server.py — uses full data for inference
+  (inference applies checkpoint normalization stats which were computed on ALL data — this is the leakage)
+
+CONFIRMED: Training uses 70/15/15 temporal split.
+Task 2 fix: prepare_training_data() now returns raw data; caller must compute stats AFTER splitting.

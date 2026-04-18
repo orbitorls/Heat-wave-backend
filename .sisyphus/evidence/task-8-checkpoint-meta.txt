@@ -1,0 +1,1 @@
+PASS: Checkpoint metadata keys present: ['normalization_mean', 'normalization_std', 'input_dim', 'model_type']

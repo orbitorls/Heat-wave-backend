@@ -1,13 +1,16 @@
 import torch
-import glob
-import os
-import pickle
 import numpy as np
 from pathlib import Path
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any
 from src.core.config import settings
 from src.core.logger import logger
 from src.models.convlstm import HeatwaveConvLSTM
+
+CHECKPOINT_PATTERNS = (
+    "heatwave_model_checkpoint_v*.pth",
+    "heatwave_convlstm_v*.pth",
+)
+
 
 class ModelManager:
     def __init__(self):
@@ -20,17 +23,27 @@ class ModelManager:
         self.normalization_std: Optional[np.ndarray] = None
 
     def get_latest_checkpoint(self) -> Optional[Path]:
-        rf_files = list(settings.MODELS_DIR.glob("heatwave_model_checkpoint_v*.pth"))
-        convlstm_files = list(settings.MODELS_DIR.glob("heatwave_convlstm_v*.pth"))
-        all_files = rf_files + convlstm_files
-        if not all_files:
+        checkpoint_files = []
+        for pattern in CHECKPOINT_PATTERNS:
+            checkpoint_files.extend(settings.MODELS_DIR.glob(pattern))
+        if not checkpoint_files:
             return None
-        def get_version(f: Path):
+
+        def get_version(path: Path) -> int:
             try:
-                stem = f.stem.split("_v")[-1]
+                stem = path.stem.rsplit("_v", 1)[-1]
                 return int(stem)
-            except: return 0
-        return max(all_files, key=get_version)
+            except (ValueError, IndexError):
+                return 0
+
+        def checkpoint_sort_key(path: Path):
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            return (get_version(path), mtime, path.name)
+
+        return max(checkpoint_files, key=checkpoint_sort_key)
 
     def load_model(self, checkpoint_path: Optional[Path] = None) -> bool:
         if checkpoint_path is None:

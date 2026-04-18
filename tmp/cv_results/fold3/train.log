@@ -1,0 +1,30 @@
+Fold 3 started at 2026-04-08T16:02:00.235853 UTC
+Loading indices from D:\Heat-wave-backend\tmp\cv_splits\train_indices_fold3.csv and D:\Heat-wave-backend\tmp\cv_splits\val_indices_fold3.csv
+Train samples: 4669, Val samples: 1167
+Training frames for normalization: 5842 frames (unique)
+X_train shape: (4669, 7, 8, 65, 37), Y_train shape: (4669, 2, 8, 65, 37)
+Error loading pretrained checkpoint: Weights only load failed. This file can still be loaded, to do so you have two options, [1mdo those steps only if you trust the source of the checkpoint[0m. 
+	(1) In PyTorch 2.6, we changed the default value of the `weights_only` argument in `torch.load` from `False` to `True`. Re-running `torch.load` with `weights_only` set to `False` will likely succeed, but it can result in arbitrary code execution. Do it only if you got the file from a trusted source.
+	(2) Alternatively, to load with `weights_only=True` please check the recommended steps in the following error message.
+	WeightsUnpickler error: Unsupported global: GLOBAL imblearn.ensemble._forest.BalancedRandomForestClassifier was not an allowed global by default. Please use `torch.serialization.add_safe_globals([BalancedRandomForestClassifier])` or the `torch.serialization.safe_globals([BalancedRandomForestClassifier])` context manager to allowlist this global if you trust this class/function.
+
+Check the documentation of torch.load to learn more about types accepted by default with weights_only https://pytorch.org/docs/stable/generated/torch.load.html. (continuing from scratch)
+No compatible pretrained checkpoint found; training from scratch.
+Epoch 1/10 | Train Loss: 0.098308 | Val Loss: 0.043840 | Val RMSE(temp): 1.523342 | Time: 30.3s
+Saved best model to tmp\cv_results\fold3\model.pt
+Epoch 2/10 | Train Loss: 0.040165 | Val Loss: 0.037934 | Val RMSE(temp): 1.437504 | Time: 29.8s
+Saved best model to tmp\cv_results\fold3\model.pt
+Epoch 3/10 | Train Loss: 0.036193 | Val Loss: 0.034451 | Val RMSE(temp): 1.386645 | Time: 28.9s
+Saved best model to tmp\cv_results\fold3\model.pt
+Epoch 4/10 | Train Loss: 0.034796 | Val Loss: 0.034187 | Val RMSE(temp): 1.399530 | Time: 29.4s
+Epoch 5/10 | Train Loss: 0.034018 | Val Loss: 0.034160 | Val RMSE(temp): 1.384320 | Time: 29.4s
+Saved best model to tmp\cv_results\fold3\model.pt
+Epoch 6/10 | Train Loss: 0.033711 | Val Loss: 0.033636 | Val RMSE(temp): 1.386639 | Time: 29.0s
+Epoch 7/10 | Train Loss: 0.033415 | Val Loss: 0.032862 | Val RMSE(temp): 1.361873 | Time: 30.2s
+Saved best model to tmp\cv_results\fold3\model.pt
+Epoch 8/10 | Train Loss: 0.033141 | Val Loss: 0.033581 | Val RMSE(temp): 1.382339 | Time: 33.0s
+Epoch 9/10 | Train Loss: 0.032925 | Val Loss: 0.032954 | Val RMSE(temp): 1.356595 | Time: 30.8s
+Saved best model to tmp\cv_results\fold3\model.pt
+Epoch 10/10 | Train Loss: 0.032851 | Val Loss: 0.032457 | Val RMSE(temp): 1.357778 | Time: 29.7s
+Saved metrics to D:\Heat-wave-backend\tmp\cv_results\fold3\metrics.json
+Fold 3 finished in 304.2s

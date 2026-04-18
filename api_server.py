@@ -38,6 +38,11 @@ LOGGER = logging.getLogger(__name__)
 EPSILON = 1e-6
 REGION_SAMPLING_RADIUS_DEGREES = 0.75
 REGION_SAMPLING_SIGMA_KM = 45.0
+CHECKPOINT_PATTERNS = (
+    "heatwave_model_checkpoint_v*.pth",
+    "heatwave_convlstm_v*.pth",
+)
+SUPPORTED_LABELING_METHODS = ("temperature", "heat_index", "anomaly")
 
 
 class _TrainingPollLogFilter(logging.Filter):
@@ -86,16 +91,13 @@ _prediction_cache = {}
 runtime_seq_len = SEQ_LEN
 runtime_future_seq = FUTURE_SEQ
 runtime_model_type = "balanced_random_forest"
+temperature_forecast_context: Optional[dict[str, Any]] = None
 training_lock = threading.Lock()
 # Track original model type for fallback
 _original_model_loaded = False
 # XGBoost model reference
 _xgboost_model = None
 
-# Track original model type for fallback
-_original_model_loaded = False
-# XGBoost model reference
-_xgboost_model = None
 # Track original data time for accurate date reporting
 _test_time_index: Optional[list] = None
 _test_time_base: Optional[datetime.datetime] = None
@@ -127,21 +129,28 @@ MAX_TRAINING_HISTORY = 30
 def get_latest_model(model_dir):
     if not os.path.exists(model_dir):
         return None
-    rf_files = glob.glob(os.path.join(model_dir, "heatwave_model_checkpoint_v*.pth"))
-    convlstm_files = glob.glob(os.path.join(model_dir, "heatwave_convlstm_v*.pth"))
+    checkpoint_files = []
+    for pattern in CHECKPOINT_PATTERNS:
+        checkpoint_files.extend(glob.glob(os.path.join(model_dir, pattern)))
 
-    def get_version(f):
+    if not checkpoint_files:
+        return None
+
+    def get_version(path):
         try:
-            return int(f.split("_v")[-1].split(".")[0])
+            stem = os.path.splitext(os.path.basename(path))[0]
+            return int(stem.rsplit("_v", 1)[-1])
         except (ValueError, IndexError):
             return 0
 
-    # Prefer RF/checkpoint (XGBoost v60) over ConvLSTM
-    if rf_files:
-        return max(rf_files, key=get_version)
-    if convlstm_files:
-        return max(convlstm_files, key=get_version)
-    return None
+    def checkpoint_sort_key(path):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        return (get_version(path), mtime, os.path.basename(path))
+
+    return max(checkpoint_files, key=checkpoint_sort_key)
 
 
 def _safe_torch_load(path, map_location):
@@ -206,6 +215,7 @@ def _build_result_from_metadata(checkpoint_path, metadata, model_type):
         "heatwave_threshold_c": metadata.get("heatwave_threshold_c"),
         "heatwave_heat_index_threshold": metadata.get("heatwave_heat_index_threshold"),
         "heatwave_temperature_threshold": metadata.get("heatwave_temperature_threshold"),
+        "heatwave_anomaly_threshold": metadata.get("heatwave_anomaly_threshold"),
         "threshold_selection_mode": metadata.get("threshold_selection_mode"),
         "event_probability_threshold": metadata.get("event_probability_threshold"),
         "train_positive_count": metadata.get("train_positive_count"),
@@ -248,6 +258,7 @@ def _build_config_from_metadata(metadata):
         "labeling_method",
         "heatwave_heat_index_threshold",
         "heatwave_temperature_threshold",
+        "heatwave_anomaly_threshold",
     ]
     config = {}
     for key in keys:
@@ -541,6 +552,7 @@ def get_default_training_config():
         "labeling_method": "temperature",
         "heatwave_heat_index_threshold": 41.0,
         "heatwave_temperature_threshold": 35.0,
+        "heatwave_anomaly_threshold": 6.0,
     }
 
 
@@ -627,6 +639,7 @@ def sanitize_training_config(payload):
     _coerce_float(config, payload, "max_train_positive_rate", 0.01, 0.99, errors)
     _coerce_float(config, payload, "heatwave_heat_index_threshold", 20.0, 70.0, errors)
     _coerce_float(config, payload, "heatwave_temperature_threshold", 25.0, 50.0, errors)
+    _coerce_float(config, payload, "heatwave_anomaly_threshold", 0.1, 20.0, errors)
 
     for key in (
         "use_gpu",
@@ -642,8 +655,9 @@ def sanitize_training_config(payload):
             config[key] = parsed
 
     labeling_method = str(payload.get("labeling_method", config["labeling_method"])).strip().lower()
-    if labeling_method not in {"heat_index", "temperature"}:
-        errors.append("labeling_method must be 'heat_index' or 'temperature'")
+    if labeling_method not in SUPPORTED_LABELING_METHODS:
+        allowed = "', '".join(SUPPORTED_LABELING_METHODS)
+        errors.append(f"labeling_method must be one of '{allowed}'")
     else:
         config["labeling_method"] = labeling_method
 
@@ -673,7 +687,9 @@ def sanitize_training_config(payload):
 
 def training_preflight_summary():
     data_files = glob.glob(os.path.join(DATA_DIR, "*.nc"))
-    model_files = glob.glob(os.path.join(MODELS_DIR, "heatwave_model_checkpoint_v*.pth"))
+    model_files = []
+    for pattern in CHECKPOINT_PATTERNS:
+        model_files.extend(glob.glob(os.path.join(MODELS_DIR, pattern)))
 
     issues = []
     if not os.path.isdir(DATA_DIR):
@@ -840,6 +856,17 @@ def resources_ready():
     )
 
 
+def temperature_forecast_ready() -> bool:
+    if runtime_model_type == "convlstm":
+        return resources_ready()
+    return bool(
+        temperature_forecast_context
+        and temperature_forecast_context.get("model") is not None
+        and temperature_forecast_context.get("X_test") is not None
+        and len(temperature_forecast_context.get("X_test")) > 0
+    )
+
+
 def get_sample_date(sample_idx=-1, day_offset=0):
     """Get the date for a sample index with optional day offset.
     
@@ -901,6 +928,7 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
     global model, X_test, Y_test, lats, lons, mean, std
     global temp_mean_scalar, temp_std_scalar, bbox, _prediction_cache
     global runtime_seq_len, runtime_future_seq, runtime_model_type
+    global temperature_forecast_context
 
     checkpoint_path = checkpoint_path or get_latest_model(MODELS_DIR)
     if not checkpoint_path:
@@ -993,6 +1021,10 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
     if grid_aligned:
         data_raw = _refresh_static_coordinate_channels(data_raw, lats, lons)
         data_mean, data_std = compute_normalization_stats(data_raw)
+
+    full_data_raw = np.array(data_raw, copy=True)
+    full_data_mean = np.array(data_mean, copy=True)
+    full_data_std = np.array(data_std, copy=True)
 
     expected_input_dim = int(metadata.get("input_dim", data_raw.shape[1]))
     current_input_dim = int(data_raw.shape[1])
@@ -1106,6 +1138,14 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
         "east": float(np.max(lons)),
         "west": float(np.min(lons)),
     }
+    temperature_forecast_context = None
+    if runtime_model_type != "convlstm":
+        temperature_forecast_context = _load_secondary_temperature_context(
+            primary_checkpoint_path=checkpoint_path,
+            data_raw=full_data_raw,
+            data_mean=full_data_mean,
+            data_std=full_data_std,
+        )
     _prediction_cache = {}
 
     print(f"Loaded {len(X_test)} test samples.")
@@ -1163,18 +1203,230 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
     return True
 
 
+def _build_convlstm_from_checkpoint(checkpoint, metadata):
+    raw_sd = checkpoint["model_state_dict"]
+    remapped = {}
+    for key, value in raw_sd.items():
+        nk = key.replace("cell_list.", "encoder_cells.").replace("final_conv.", "output_conv.")
+        remapped[nk] = value
+
+    hidden_dim = metadata.get("hidden_dim", checkpoint.get("hidden_dim", [32, 32]))
+    kernel_size = metadata.get("kernel_size", checkpoint.get("kernel_size", [(3, 3), (3, 3)]))
+    num_layers = int(metadata.get("num_layers", checkpoint.get("num_layers", 2)))
+
+    if metadata.get("input_dim") or checkpoint.get("input_dim"):
+        input_dim = int(metadata.get("input_dim", checkpoint.get("input_dim", 8)))
+    else:
+        first_w = remapped.get("encoder_cells.0.conv.weight")
+        if first_w is not None:
+            input_dim = int(first_w.shape[1] - hidden_dim[0])
+        else:
+            input_dim = 8
+
+    conv_model = HeatwaveConvLSTM(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        kernel_size=kernel_size,
+        num_layers=num_layers,
+    ).to(DEVICE)
+    conv_model.load_state_dict(remapped)
+    conv_model.eval()
+    metadata["input_dim"] = input_dim
+    return conv_model, metadata
+
+
+def _prepare_sequences_for_checkpoint(data_raw, data_mean, data_std, metadata):
+    prepared_raw = np.array(data_raw, copy=True)
+    prepared_mean = np.array(data_mean, copy=True)
+    prepared_std = np.array(data_std, copy=True)
+
+    expected_input_dim = int(metadata.get("input_dim", prepared_raw.shape[1]))
+    current_input_dim = int(prepared_raw.shape[1])
+    if current_input_dim != expected_input_dim:
+        if expected_input_dim == 6 and current_input_dim >= 8:
+            legacy_indices = [0, 1, 2, 5, 6, 7]
+            prepared_raw = prepared_raw[:, legacy_indices, :, :]
+            prepared_mean = prepared_mean[:, legacy_indices, :, :]
+            prepared_std = prepared_std[:, legacy_indices, :, :]
+        elif expected_input_dim < current_input_dim:
+            prepared_raw = prepared_raw[:, :expected_input_dim, :, :]
+            prepared_mean = prepared_mean[:, :expected_input_dim, :, :]
+            prepared_std = prepared_std[:, :expected_input_dim, :, :]
+        else:
+            raise RuntimeError(
+                f"Checkpoint expects {expected_input_dim} channels but runtime data provides {current_input_dim}"
+            )
+
+    ckpt_mean = metadata.get("normalization_mean")
+    ckpt_std = metadata.get("normalization_std")
+    if ckpt_mean is not None and ckpt_std is not None:
+        ckpt_mean_arr = np.asarray(ckpt_mean)
+        ckpt_std_arr = np.asarray(ckpt_std)
+        if (
+            ckpt_mean_arr.ndim == 4
+            and ckpt_std_arr.ndim == 4
+            and ckpt_mean_arr.shape[1] == prepared_raw.shape[1]
+            and ckpt_std_arr.shape[1] == prepared_raw.shape[1]
+        ):
+            prepared_mean = ckpt_mean_arr
+            prepared_std = ckpt_std_arr
+
+    prepared_raw, _ = clean_data(prepared_raw)
+    prepared = normalize_data(prepared_raw, prepared_mean, prepared_std)
+    seq_len = int(metadata.get("seq_len", SEQ_LEN))
+    future_seq = int(metadata.get("future_seq", FUTURE_SEQ))
+    x_all, y_all = create_sequences(prepared, seq_len=seq_len, pred_len=future_seq)
+    if len(x_all) == 0:
+        raise RuntimeError("No sequences available for checkpoint-aligned inference")
+
+    split_idx = int(len(x_all) * 0.85)
+    x_test_local = x_all[split_idx:]
+    y_test_local = y_all[split_idx:]
+    if len(x_test_local) == 0:
+        raise RuntimeError("No test sequences available after split")
+
+    checkpoint_temp_mean = metadata.get("temp_mean")
+    checkpoint_temp_std = metadata.get("temp_std")
+    if checkpoint_temp_mean is not None and checkpoint_temp_std is not None:
+        local_temp_mean = float(checkpoint_temp_mean)
+        local_temp_std = float(checkpoint_temp_std)
+    else:
+        local_temp_mean = float(prepared_mean[0, 1, 0, 0])
+        local_temp_std = float(prepared_std[0, 1, 0, 0])
+
+    return {
+        "X_test": x_test_local,
+        "Y_test": y_test_local,
+        "mean": prepared_mean,
+        "std": prepared_std,
+        "temp_mean_scalar": local_temp_mean,
+        "temp_std_scalar": local_temp_std,
+        "seq_len": seq_len,
+        "future_seq": future_seq,
+    }
+
+
+def _load_secondary_temperature_context(primary_checkpoint_path, data_raw, data_mean, data_std):
+    convlstm_files = glob.glob(os.path.join(MODELS_DIR, "heatwave_convlstm_v*.pth"))
+    if not convlstm_files:
+        return None
+
+    primary_abs = os.path.abspath(primary_checkpoint_path)
+    candidates = [path for path in convlstm_files if os.path.abspath(path) != primary_abs]
+    if not candidates:
+        return None
+
+    def sort_key(path):
+        try:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            version = int(stem.rsplit("_v", 1)[-1])
+        except (ValueError, IndexError):
+            version = 0
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        return (version, mtime, os.path.basename(path))
+
+    checkpoint_path = max(candidates, key=sort_key)
+    try:
+        checkpoint = _safe_torch_load(checkpoint_path, map_location=DEVICE)
+        metadata = checkpoint.get("metadata", {}) if isinstance(checkpoint, dict) else {}
+        if "model_state_dict" not in checkpoint:
+            return None
+        conv_model, metadata = _build_convlstm_from_checkpoint(checkpoint, metadata)
+        sequence_context = _prepare_sequences_for_checkpoint(
+            data_raw=data_raw,
+            data_mean=data_mean,
+            data_std=data_std,
+            metadata=metadata,
+        )
+        sequence_context.update(
+            {
+                "model": conv_model,
+                "model_type": "convlstm",
+                "checkpoint_path": checkpoint_path,
+            }
+        )
+        LOGGER.info("Loaded secondary ConvLSTM temperature context from %s", checkpoint_path)
+        return sequence_context
+    except Exception as exc:
+        LOGGER.warning("Unable to load secondary ConvLSTM temperature context: %s", exc)
+        return None
+
+
+def _denormalize_temperature_grid(temp_norm, local_temp_mean, local_temp_std):
+    temp_denorm = temp_norm * (local_temp_std + EPSILON) + local_temp_mean
+    if np.nanmean(temp_denorm) > 200:
+        temp_celsius = temp_denorm - 273.15
+    else:
+        temp_celsius = temp_denorm
+    return np.clip(temp_celsius, -10.0, 60.0)
+
+
+def _extract_observed_temperature_grid(sample_idx=-1, context=None):
+    local_context = context or {
+        "X_test": X_test,
+        "temp_mean_scalar": temp_mean_scalar,
+        "temp_std_scalar": temp_std_scalar,
+    }
+    x_test_local = local_context.get("X_test")
+    if x_test_local is None or len(x_test_local) == 0:
+        raise RuntimeError("Observed temperature data is not available")
+    x_seq = np.array(x_test_local[sample_idx], copy=True)
+    temp_norm = x_seq[-1, 1, :, :]
+    return _denormalize_temperature_grid(
+        temp_norm,
+        float(local_context["temp_mean_scalar"]),
+        float(local_context["temp_std_scalar"]),
+    )
+
+
+def _predict_temperature_from_context(context, sample_idx=-1, days=7):
+    x_seq = np.array(context["X_test"][sample_idx], copy=True)
+    x_tensor = torch.from_numpy(x_seq).unsqueeze(0).float().to(DEVICE)
+    outputs = []
+    with torch.no_grad():
+        output = context["model"](x_tensor, future_seq=days)
+    for day_idx in range(days):
+        temp_norm = output[0, day_idx, 1, :, :].cpu().numpy()
+        outputs.append(
+            _denormalize_temperature_grid(
+                temp_norm,
+                float(context["temp_mean_scalar"]),
+                float(context["temp_std_scalar"]),
+            )
+        )
+    return outputs
+
+
+def _temperature_forecast_context():
+    if runtime_model_type == "convlstm":
+        return {
+            "model": model,
+            "X_test": X_test,
+            "temp_mean_scalar": temp_mean_scalar,
+            "temp_std_scalar": temp_std_scalar,
+            "model_type": runtime_model_type,
+            "checkpoint_path": None,
+        }
+    return temperature_forecast_context
+
+
 def get_prediction_data(sample_idx=-1):
-    """Run model inference and return (denormalized temperature grid, probability)."""
+    """Run model inference and return (display temperature grid, probability)."""
     if not resources_ready():
         raise RuntimeError("Model or data resources are not ready")
     cache_key = (sample_idx, 1)
     if cache_key in _prediction_cache:
-        return _prediction_cache[cache_key][0]
-    return get_prediction_sequence(sample_idx=sample_idx, days=1)[0]
+        entry = _prediction_cache[cache_key][0]
+        return entry["temperature_grid"], entry["probability"]
+    entry = get_prediction_sequence(sample_idx=sample_idx, days=1)[0]
+    return entry["temperature_grid"], entry["probability"]
 
 
 def get_prediction_sequence(sample_idx=-1, days=7):
-    """Run autoregressive inference and return (temperature grid, probability) by day."""
+    """Return inference payloads with observed and forecasted temperature separated."""
     if not resources_ready():
         raise RuntimeError("Model or data resources are not ready")
     assert model is not None
@@ -1186,38 +1438,37 @@ def get_prediction_sequence(sample_idx=-1, days=7):
     if cache_key in _prediction_cache:
         return _prediction_cache[cache_key]
 
-    x_seq = np.array(X_test[sample_idx], copy=True)
     outputs = []
 
+    observed_grid = _extract_observed_temperature_grid(sample_idx=sample_idx)
+    forecast_context = _temperature_forecast_context()
+    forecast_grids = None
+    if forecast_context is not None:
+        forecast_grids = _predict_temperature_from_context(
+            forecast_context,
+            sample_idx=sample_idx,
+            days=days,
+        )
+
     if runtime_model_type == "convlstm":
-        # ConvLSTM path: single forward pass for all days
-        x_tensor = torch.from_numpy(x_seq).unsqueeze(0).float().to(DEVICE)
-        with torch.no_grad():
-            output = model(x_tensor, future_seq=days)
-        # output shape: (1, days, channels, H, W)
-        for d in range(days):
-            temp_norm = output[0, d, 1, :, :].cpu().numpy()
-            temp_denorm = temp_norm * (temp_std_scalar + EPSILON) + temp_mean_scalar
-            
-            # Detect if temp_denorm is in Kelvin or Celsius
-            # Thailand temps should be 20-45°C, not 250-320K after denorm
-            # If mean > 200, it's likely Kelvin and needs conversion
-            if np.nanmean(temp_denorm) > 200:
-                temp_celsius = temp_denorm - 273.15
-            else:
-                temp_celsius = temp_denorm
-            
-            # Clamp to reasonable Celsius range for Thailand (-10 to 60°C)
-            temp_celsius = np.clip(temp_celsius, -10.0, 60.0)
-            
-            # Probability derived from predicted max temperature
+        assert forecast_grids is not None
+        for temp_celsius in forecast_grids:
             max_temp = float(np.nanmax(temp_celsius))
             prob = min(1.0, max(0.0, (max_temp - 30.0) / 15.0))
-            outputs.append((temp_celsius, prob))
+            outputs.append(
+                {
+                    "temperature_grid": temp_celsius,
+                    "forecast_temperature_grid": temp_celsius,
+                    "observed_temperature_grid": observed_grid,
+                    "probability": prob,
+                    "temperature_source": "forecast_model",
+                    "forecast_available": True,
+                }
+            )
     else:
-        # RF path: persistence baseline + classifier probability per day
+        x_seq = np.array(X_test[sample_idx], copy=True)
         expected_flat_dim = int(getattr(model, "n_features_in_", 0) or 0)
-        for _ in range(days):
+        for day_idx in range(days):
             x_flat = x_seq.reshape(1, -1)
             if expected_flat_dim and x_flat.shape[1] != expected_flat_dim:
                 raise RuntimeError(
@@ -1225,22 +1476,28 @@ def get_prediction_sequence(sample_idx=-1, days=7):
                     f"expected: {expected_flat_dim}, got: {x_flat.shape[1]}"
                 )
             prob = float(model.predict_proba(x_flat)[0, 1])
-
-            # Persistence baseline: last observed temperature frame
             pred_step = np.array(x_seq[-1], copy=True)
-
-            temp_norm = pred_step[1]
-            temp_denorm = (temp_norm * (temp_std_scalar + EPSILON)) + temp_mean_scalar
-            
-            # Detect if temp_denorm is in Kelvin or Celsius
-            if np.nanmean(temp_denorm) > 200:
-                temp_celsius = temp_denorm - 273.15
-            else:
-                temp_celsius = temp_denorm
-            
-            # Clamp to reasonable Celsius range for Thailand (-10 to 60°C)
-            temp_celsius = np.clip(temp_celsius, -10.0, 60.0)
-            outputs.append((temp_celsius, prob))
+            fallback_observed = _denormalize_temperature_grid(
+                pred_step[1],
+                float(temp_mean_scalar),
+                float(temp_std_scalar),
+            )
+            forecast_grid = (
+                forecast_grids[day_idx] if forecast_grids is not None else None
+            )
+            display_grid = forecast_grid if forecast_grid is not None else fallback_observed
+            outputs.append(
+                {
+                    "temperature_grid": display_grid,
+                    "forecast_temperature_grid": forecast_grid,
+                    "observed_temperature_grid": fallback_observed,
+                    "probability": prob,
+                    "temperature_source": (
+                        "forecast_model" if forecast_grid is not None else "observed_persistence"
+                    ),
+                    "forecast_available": forecast_grid is not None,
+                }
+            )
 
             # Autoregressive update for classifier backend
             x_seq = np.concatenate([x_seq[1:], pred_step[None, :, :, :]], axis=0)
@@ -1401,30 +1658,12 @@ def predict_summary():
         from api_daily_predict import daily_model_ready, load_daily_model, predict_from_daily_weather, _daily_threshold
         
         if daily_model_ready() or load_daily_model():
-            # Use XGBoost prediction
-            # Get latest temperature data from test set for features
             if X_test is not None and len(X_test) > 0:
-                # Get the last sample's temperature features
-                last_sample = X_test[-1] if runtime_model_type == "convlstm" else X_test[-1]
-                
-                # Extract temperature statistics from test data
-                # The format depends on model type
-                if runtime_model_type == "convlstm" and temp_mean_scalar is not None:
-                    # ConvLSTM format: (seq_len, channels, H, W)
-                    temp_data = last_sample[-1, 1, :, :]  # Last timestep, temp channel
-                    temp_data = temp_data * (temp_std_scalar + EPSILON) + temp_mean_scalar
-                    if np.nanmean(temp_data) > 200:
-                        temp_data = temp_data - 273.15  # Convert Kelvin to Celsius
-                    temp_max = float(np.nanmax(temp_data))
-                    temp_mean = float(np.nanmean(temp_data))
-                    temp_min = float(np.nanmin(temp_data))
-                else:
-                    # RF format: flattened
-                    temp_max = 35.0  # Default
-                    temp_mean = 30.0
-                    temp_min = 25.0
+                observed_grid = _extract_observed_temperature_grid()
+                temp_max = float(np.nanmax(observed_grid))
+                temp_mean = float(np.nanmean(observed_grid))
+                temp_min = float(np.nanmin(observed_grid))
             else:
-                # No test data, use defaults
                 temp_max = 35.0
                 temp_mean = 30.0
                 temp_min = 25.0
@@ -1461,8 +1700,10 @@ def predict_summary():
                 "risk_label": risk_info['label'],
                 "risk_index": risk_info['index'],
                 "probability": result['heatwave_probability'],
-                "advice": f"Temperature {temp_max:.1f}C with {result['heatwave_probability']*100:.1f}% heatwave probability. {risk_info['label']}.",
+                "advice": f"Observed max temperature {temp_max:.1f}C with {result['heatwave_probability']*100:.1f}% heatwave probability. {risk_info['label']}.",
                 "model_type": "xgboost_daily",
+                "temperature_source": "observed_latest_input",
+                "forecast_available": False,
                 "weather": {
                     "T2M_MAX": temp_max,
                     "T2M": temp_mean,
@@ -1487,18 +1728,27 @@ def predict_summary():
         return jsonify({"error": "No model loaded"}), 500
 
     try:
-        temp_grid, prob = get_prediction_data()
-        max_temp = float(np.max(temp_grid))
-        mean_temp = float(np.mean(temp_grid))
-        min_temp = float(np.min(temp_grid))
+        prediction = get_prediction_sequence(days=1)[0]
+        display_grid = prediction["temperature_grid"]
+        observed_grid = prediction["observed_temperature_grid"]
+        forecast_grid = prediction["forecast_temperature_grid"]
+        prob = prediction["probability"]
+        max_temp = float(np.max(display_grid))
+        mean_temp = float(np.mean(display_grid))
+        min_temp = float(np.min(display_grid))
+        observed_max = float(np.max(observed_grid))
+        observed_mean = float(np.mean(observed_grid))
+        observed_min = float(np.min(observed_grid))
 
         # Get actual date from data
         actual_date = get_sample_date(sample_idx=-1, day_offset=0)
         
         risk_payload = _build_risk_payload_from_temperature(max_temp, model_probability=prob)
-        region_payload = _region_payload_from_grid(temp_grid, model_probability=prob)
+        region_payload = _region_payload_from_grid(display_grid, model_probability=prob)
         risk_level = risk_payload["risk_code"]
         probability = risk_payload["probability"]
+        forecast_available = bool(prediction["forecast_available"])
+        temperature_source = prediction["temperature_source"]
 
         return jsonify(
             {
@@ -1516,8 +1766,14 @@ def predict_summary():
                     "risk_index": risk_payload["risk_index"],
                 },
                 "probability": probability,
-                "advice": f"Max temp reaching {max_temp:.1f} C. {risk_level} precautions advised.",
+                "advice": (
+                    f"Forecast max temp reaching {max_temp:.1f} C. {risk_level} precautions advised."
+                    if forecast_available
+                    else f"Heatwave probability is {probability*100:.1f}% based on the latest observed max temperature {observed_max:.1f} C."
+                ),
                 "model_type": runtime_model_type,
+                "temperature_source": temperature_source,
+                "forecast_available": forecast_available,
                 "weather": {
                     "T2M_MAX": max_temp,
                     "T2M": mean_temp,
@@ -1525,6 +1781,20 @@ def predict_summary():
                     "RH2M": None,
                     "WS10M": None,
                 },
+                "observed_weather": {
+                    "T2M_MAX": observed_max,
+                    "T2M": observed_mean,
+                    "T2M_MIN": observed_min,
+                },
+                "forecast_weather": (
+                    {
+                        "T2M_MAX": max_temp,
+                        "T2M": mean_temp,
+                        "T2M_MIN": min_temp,
+                    }
+                    if forecast_grid is not None
+                    else None
+                ),
                 "anomaly": {
                     "is_anomaly": risk_level in ["HIGH", "CRITICAL"],
                     "severity": risk_level.lower(),
@@ -1547,7 +1817,7 @@ def forecast_summary():
         return jsonify({"error": "Model not loaded"}), 500
 
     try:
-        temp_grids = get_prediction_sequence(days=7)
+        predictions = get_prediction_sequence(days=7)
 
         days = []
         region_forecasts = {region["name"]: [] for region in WEB_REGIONS}
@@ -1559,10 +1829,17 @@ def forecast_summary():
         for i in range(7):
             forecast_date = base_date + datetime.timedelta(days=i + 1)
             date_str = forecast_date.strftime("%Y-%m-%d")
-            temp_grid, prob = temp_grids[i]
+            prediction = predictions[i]
+            temp_grid = prediction["temperature_grid"]
+            observed_grid = prediction["observed_temperature_grid"]
+            forecast_grid = prediction["forecast_temperature_grid"]
+            prob = prediction["probability"]
             mean_temp = float(np.mean(temp_grid))
             min_temp = float(np.min(temp_grid))
             t_max = float(np.max(temp_grid))
+            observed_mean = float(np.mean(observed_grid))
+            observed_min = float(np.min(observed_grid))
+            observed_max = float(np.max(observed_grid))
             risk_payload = _build_risk_payload_from_temperature(t_max, model_probability=prob)
             risk_level = risk_payload["risk_code"]
             probability = risk_payload["probability"]
@@ -1582,7 +1859,13 @@ def forecast_summary():
                         "risk_label": risk_payload["risk_label"],
                         "risk_index": risk_payload["risk_index"],
                     },
-                    "advice": f"Generated from {runtime_model_type} autoregressive forecast",
+                    "advice": (
+                        f"Generated from {runtime_model_type} temperature forecast"
+                        if prediction["forecast_available"]
+                        else "No dedicated temperature forecast model is available; temperatures reflect the latest observed persistence baseline."
+                    ),
+                    "temperature_source": prediction["temperature_source"],
+                    "forecast_available": bool(prediction["forecast_available"]),
                     "weather": {
                         "T2M": mean_temp,
                         "T2M_MAX": t_max,
@@ -1592,6 +1875,20 @@ def forecast_summary():
                         "RH2M": None,
                         "NDVI": None,
                     },
+                    "observed_weather": {
+                        "T2M": observed_mean,
+                        "T2M_MAX": observed_max,
+                        "T2M_MIN": observed_min,
+                    },
+                    "forecast_weather": (
+                        {
+                            "T2M": mean_temp,
+                            "T2M_MAX": t_max,
+                            "T2M_MIN": min_temp,
+                        }
+                        if forecast_grid is not None
+                        else None
+                    ),
                 }
             )
 
@@ -1617,6 +1914,7 @@ def forecast_summary():
                             "T2M_MAX": region_entry["temperature"],
                             "T2M_MIN": region_entry["temperature"],
                         },
+                        "temperature_source": prediction["temperature_source"],
                         "temperature": region_entry["temperature"],
                         "temperature_c": region_entry["temperature"],
                     }
@@ -1642,6 +1940,9 @@ def forecast_summary():
                 "days": 7,
                 "base_date": base_date.strftime("%Y-%m-%d"),
                 "generated_at": generated_at.isoformat(),
+                "forecast_available": any(
+                    bool(prediction["forecast_available"]) for prediction in predictions
+                ),
                 "forecasts": days,
                 "region_forecasts": region_forecast_items,
             }

@@ -1,0 +1,64 @@
+C:\Users\User\AppData\Roaming\Python\Python312\site-packages\torch\cuda\__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+============================================================
+HEATWAVE PREDICTION MODEL TRAINING
+============================================================
+Sequence Length: 5 days
+Forecast Horizon: 2 days
+Random Forest: n_estimators=300, max_depth=25
+HP Tuning: Disabled
+Walk-Forward CV: Disabled
+Feature Engineering: Disabled
+============================================================
+Starting Heatwave AI Training...
+Random seed set to 42 for reproducibility
+Config: seq=5, future=2, rf_trees=300, depth=25, backend=balanced_rf, gpu=False, force_gpu=False, labeling=temperature, sampling=all, clip=(0.5,99.5)
+
+[1/6] Loading ERA5 Data using new DataLoader...
+      Loading combined ERA5 + NASA POWER data...
+2026-04-10 17:35:34,386 - heatwave - INFO - Loading 67 files from D:\Heat-wave-backend\era5_data...
+2026-04-10 17:36:24,536 - heatwave - WARNING - Skipped 35 file(s) due to incompatible schema or empty crop.
+2026-04-10 17:36:25,588 - heatwave - INFO - Loading 35 NASA POWER files...
+2026-04-10 17:36:55,462 - heatwave - INFO - Merging ERA5 and NASA POWER datasets...
+2026-04-10 17:36:55,462 - heatwave - INFO - Renamed NASA POWER variables: {'T2M': 't2m_power', 'RH2M': 'humidity', 'PRECTOTCORR': 'tp', 'T2MDEW': 'd2m'}
+2026-04-10 17:36:58,247 - heatwave - INFO - Combined dataset variables: ['t2m', 'swvl1', 'z', 'tp', 'humidity', 'd2m', 't2m_power', 'WS10M', 'PS']
+2026-04-10 17:36:58,252 - heatwave - INFO - Preparing training data (dynamic + static channels)...
+      Available dynamic variables: ['z', 't2m', 'swvl1', 'tp', 'humidity']
+      Missing dynamic variables: []
+      Data quality: missing_dynamic=0 near_zero_std_channels=0
+      Normalized Data Shape: (18627, 8, 65, 44)
+
+[2/6] Temporal split (train/val/test)...
+      Filling NaN values within each split (causal)...
+      Split config: train=75%, val=10%, test=15% | Total timesteps: 18627
+      Sample counts: 13970/1862/2795
+      Applying clipping: [0.5%, 99.5%] percentiles
+      Normalization computed from 13970 training timesteps.
+      Samples train/val/test: 13964/1856/2789
+Unable to derive both classes from event thresholds. Falling back to sample-mean based labels (top 10% hottest samples).
+      Heatwave threshold (selected): 126.56 C
+      Threshold selection mode: temperature_sample_mean_fallback
+      Positive rate train/val/test: 0.100/0.191/0.300
+
+[4/6] Initializing BalancedRandomForestClassifier (CPU)...
+
+[5/6] Training + validation metrics...
+      Prob Threshold: 0.420 (validation_f1_search) |       Train Brier: 0.008367 | Val Brier: 0.063779 | Val PR-AUC: 0.8399178257019511 | Val Event F1: 0.7812 | Val Recall: 0.7768
+
+[6/6] Test evaluation + baseline comparison + checkpoint save...
+Training completed in 30.79 seconds.
+Test Brier: 0.077733 | PR-AUC: 0.909846690679983 | Event F1: 0.8271 | Hit Rate: 0.8079 | False Alarm: 0.0625
+Seasonal F1: {'cool_dry': 0.5, 'hot_dry': 0.905393457117595, 'rainy': 0.6597510373443984}
+Regional F1: {'south': 0.35916134913400183, 'central': 0.35916134913400183, 'north': 0.35916134913400183}
+Model checkpoint saved to: models\heatwave_model_checkpoint_v38.pth
+
+[Report] Generating training report...
+      Training report saved: output\training_report_20260410_173742.png
+
+============================================================
+TRAINING COMPLETED SUCCESSFULLY
+============================================================
+Model saved to: models\heatwave_model_checkpoint_v38.pth
+Test F1: 0.8271
+Test Precision: 0.8473
+Test Recall: 0.8079

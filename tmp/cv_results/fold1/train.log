@@ -1,0 +1,33 @@
+D:\Heat-wave-backend\scripts\cv_crossval_convlstm.py:117: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  print(f'Fold {fold} started at {datetime.datetime.utcnow().isoformat()} UTC')
+Fold 1 started at 2026-04-08T15:52:18.306236 UTC
+Loading indices from D:\Heat-wave-backend\tmp\cv_splits\train_indices_fold1.csv and D:\Heat-wave-backend\tmp\cv_splits\val_indices_fold1.csv
+Train samples: 4668, Val samples: 1168
+Training frames for normalization: 5842 frames (unique)
+X_train shape: (4668, 7, 8, 65, 37), Y_train shape: (4668, 2, 8, 65, 37)
+Error loading pretrained checkpoint: Weights only load failed. This file can still be loaded, to do so you have two options, [1mdo those steps only if you trust the source of the checkpoint[0m. 
+	(1) In PyTorch 2.6, we changed the default value of the `weights_only` argument in `torch.load` from `False` to `True`. Re-running `torch.load` with `weights_only` set to `False` will likely succeed, but it can result in arbitrary code execution. Do it only if you got the file from a trusted source.
+	(2) Alternatively, to load with `weights_only=True` please check the recommended steps in the following error message.
+	WeightsUnpickler error: Unsupported global: GLOBAL imblearn.ensemble._forest.BalancedRandomForestClassifier was not an allowed global by default. Please use `torch.serialization.add_safe_globals([BalancedRandomForestClassifier])` or the `torch.serialization.safe_globals([BalancedRandomForestClassifier])` context manager to allowlist this global if you trust this class/function.
+
+Check the documentation of torch.load to learn more about types accepted by default with weights_only https://pytorch.org/docs/stable/generated/torch.load.html. (continuing from scratch)
+No compatible pretrained checkpoint found; training from scratch.
+Epoch 1/10 | Train Loss: 0.093126 | Val Loss: 0.042712 | Val RMSE(temp): 1.498365 | Time: 30.7s
+Saved best model to tmp\cv_results\fold1\model.pt
+Epoch 2/10 | Train Loss: 0.040286 | Val Loss: 0.037710 | Val RMSE(temp): 1.443196 | Time: 28.3s
+Saved best model to tmp\cv_results\fold1\model.pt
+Epoch 3/10 | Train Loss: 0.036485 | Val Loss: 0.035798 | Val RMSE(temp): 1.410961 | Time: 28.1s
+Saved best model to tmp\cv_results\fold1\model.pt
+Epoch 4/10 | Train Loss: 0.035009 | Val Loss: 0.033569 | Val RMSE(temp): 1.361060 | Time: 28.2s
+Saved best model to tmp\cv_results\fold1\model.pt
+Epoch 5/10 | Train Loss: 0.034306 | Val Loss: 0.034891 | Val RMSE(temp): 1.395345 | Time: 28.2s
+Epoch 6/10 | Train Loss: 0.033873 | Val Loss: 0.033275 | Val RMSE(temp): 1.358794 | Time: 28.3s
+Saved best model to tmp\cv_results\fold1\model.pt
+Epoch 7/10 | Train Loss: 0.033566 | Val Loss: 0.033217 | Val RMSE(temp): 1.372012 | Time: 28.0s
+Epoch 8/10 | Train Loss: 0.033302 | Val Loss: 0.032501 | Val RMSE(temp): 1.353817 | Time: 28.2s
+Saved best model to tmp\cv_results\fold1\model.pt
+Epoch 9/10 | Train Loss: 0.033030 | Val Loss: 0.033415 | Val RMSE(temp): 1.364659 | Time: 28.3s
+Epoch 10/10 | Train Loss: 0.032820 | Val Loss: 0.032308 | Val RMSE(temp): 1.349888 | Time: 28.1s
+Saved best model to tmp\cv_results\fold1\model.pt
+Saved metrics to D:\Heat-wave-backend\tmp\cv_results\fold1\metrics.json
+Fold 1 finished in 288.2s
