@@ -1441,6 +1441,11 @@ def _evaluate_regional_event_metrics(y_true_temp, y_pred_prob, x_test, lats, lon
 
 
 def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = None):
+    # NOTE: ConvLSTM PyTorch training is not yet implemented in this script.
+    # This script trains RandomForest/LightGBM classifiers for heatwave classification.
+    # For ConvLSTM neural network training, implement a separate train_convlstm.py
+    # with: Adam optimizer, CosineAnnealingLR scheduler, gradient clipping (max_norm=1.0),
+    # mixed precision (torch.cuda.amp.autocast), and early stopping.
     cfg = {
         "batch_size": BATCH_SIZE,
         "seq_len": SEQ_LEN,

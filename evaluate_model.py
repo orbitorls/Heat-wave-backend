@@ -39,6 +39,12 @@ from src.data.loader import clean_data, compute_normalization_stats, create_sequ
 from src.models.convlstm import HeatwaveConvLSTM, PhysicsInformedLoss
 from src.models.manager import ModelManager
 
+try:
+    from src.evaluation.metrics import per_lead_time_metrics, print_metrics_report
+    _metrics_available = True
+except ImportError:
+    _metrics_available = False
+
 # ────────────────────────────────────────────────────────────────────────────
 # Metric helpers
 # ────────────────────────────────────────────────────────────────────────────
@@ -266,6 +272,11 @@ def evaluate(
     # Heatwave detection metrics
     hw_metrics = heatwave_detection_metrics(all_preds_temp, all_targets_temp)
 
+    # Per-lead-time metrics (shape: N, future_seq, H, W)
+    lead_time_metrics: Dict = {}
+    if _metrics_available and all_preds_temp.ndim >= 2:
+        lead_time_metrics = per_lead_time_metrics(all_targets_temp, all_preds_temp)
+
     # Temperature range info
     pred_min  = float(np.nanmin(all_preds_temp))
     pred_max  = float(np.nanmax(all_preds_temp))
@@ -295,6 +306,7 @@ def evaluate(
         "performance": {
             "mean_inference_ms_per_sample": round(float(np.mean(inference_times)) * 1000, 2),
         },
+        "lead_time_metrics": lead_time_metrics,
     }
     return results
 
@@ -376,6 +388,11 @@ def _print_results(results: Dict) -> None:
     print("\n  ── Performance ──────────────────────────────────")
     perf = results["performance"]
     print(f"  Inference:      {perf['mean_inference_ms_per_sample']} ms/sample")
+
+    lead_metrics = results.get("lead_time_metrics", {})
+    if lead_metrics and _metrics_available:
+        print_metrics_report(lead_metrics, title="Per-Lead-Time Temperature Metrics (°C)")
+
     print("=" * w + "\n")
 
 

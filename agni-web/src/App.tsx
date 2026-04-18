@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 import Overview from './components/Overview';
@@ -19,6 +19,7 @@ interface Region {
   lng: number;
   temperature: number;
   heatLevel: HeatLevel;
+  probability?: number;
 }
 
 interface ForecastDay {
@@ -161,15 +162,23 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [dataStatus, setDataStatus] = useState<DataStatus>('offline');
   const [lastUpdated, setLastUpdated] = useState<string>('');
+  const [cacheAge, setCacheAge] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string>('');
+
+  // Exponential backoff: base 5 min, doubles on error, max 30 min
+  const retryDelayRef = useRef(300_000);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
       const healthResponse = await fetch(`${API_BASE_URL}/api/health`).catch(() => null);
       if (!healthResponse?.ok) {
         setDataStatus('offline');
+        setErrorMessage('Cannot reach the API server.');
         setRegions([]);
         setForecast([]);
         setRegionForecasts({});
+        retryDelayRef.current = Math.min(retryDelayRef.current * 2, 1_800_000);
         return;
       }
 
@@ -178,10 +187,12 @@ export default function App() {
 
       if (!modelLoaded) {
         setDataStatus('model-unavailable');
+        setErrorMessage('Model is loading, please wait...');
         setRegions([]);
         setForecast([]);
         setRegionForecasts({});
         setLastUpdated(new Date().toLocaleTimeString());
+        retryDelayRef.current = Math.min(retryDelayRef.current * 2, 1_800_000);
         return;
       }
 
@@ -189,6 +200,22 @@ export default function App() {
         fetch(`${API_BASE_URL}/api/predict`),
         fetch(`${API_BASE_URL}/api/forecast`),
       ]);
+
+      // Task 4: Better error messages based on HTTP status codes
+      let statusError = '';
+      if (predictResult.status === 'fulfilled' && !predictResult.value.ok) {
+        const s = predictResult.value.status;
+        if (s === 503) statusError = 'Model is loading, please wait...';
+        else if (s === 401) statusError = 'Authentication required';
+        else statusError = `Server error (${s}). Using cached data if available.`;
+      }
+      if (!statusError && forecastResult.status === 'fulfilled' && !forecastResult.value.ok) {
+        const s = forecastResult.value.status;
+        if (s === 503) statusError = 'Forecast model is loading, please wait...';
+        else if (s === 401) statusError = 'Authentication required';
+        else statusError = `Server error (${s}). Using cached data if available.`;
+      }
+      if (statusError) setErrorMessage(statusError);
 
       let nextRegions: Region[] = [];
       let nextForecast: ForecastDay[] = [];
@@ -209,6 +236,7 @@ export default function App() {
               const lng = typeof obj.lng === 'number' ? obj.lng : Number(obj.lng);
               const temperature = extractTemperatureFromPayload(obj) ?? (typeof obj.temperature_c === 'number' ? obj.temperature_c : Number(obj.temperature_c));
               const risk = normalizeRisk(obj.risk_level ?? obj.risk_code, temperature ?? null);
+              const probability = typeof obj.probability === 'number' ? obj.probability : undefined;
 
               if (!name || !Number.isFinite(lat) || !Number.isFinite(lng) || temperature === null) {
                 return null;
@@ -221,6 +249,7 @@ export default function App() {
                 lng,
                 temperature,
                 heatLevel: risk.heatLevel,
+                probability,
               } satisfies Region;
             })
             .filter((region): region is Region => region !== null);
@@ -235,10 +264,12 @@ export default function App() {
         if (nextRegions.length === 0 && temperature !== null) {
           const obj = payload as Record<string, unknown>;
           const risk = normalizeRisk(obj.risk_level, temperature);
+          const probability = typeof obj.probability === 'number' ? obj.probability : undefined;
           nextRegions = THAILAND_REGIONS.map((region) => ({
             ...region,
             temperature,
             heatLevel: risk.heatLevel,
+            probability,
           }));
           hasApiData = true;
         }
@@ -306,21 +337,56 @@ export default function App() {
       });
       setDataStatus(hasApiData ? 'live-global' : 'api-error');
       setLastUpdated(new Date().toLocaleTimeString());
+
+      // Task 3: Save last-known-good data to localStorage on success
+      if (hasApiData) {
+        localStorage.setItem('lastKnownPrediction', JSON.stringify({ regions: nextRegions, forecast: nextForecast, regionForecasts: nextRegionForecasts }));
+        localStorage.setItem('lastKnownPredictionTime', new Date().toISOString());
+        setCacheAge(null);
+        setErrorMessage('');
+        retryDelayRef.current = 300_000; // reset backoff on success
+      }
     } catch (error) {
       console.error('Error fetching data', error);
       setDataStatus('api-error');
-      setRegions([]);
-      setForecast([]);
-      setRegionForecasts({});
+
+      // Task 3: Load last-known-good data from localStorage
+      const cached = localStorage.getItem('lastKnownPrediction');
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached) as { regions: Region[]; forecast: ForecastDay[]; regionForecasts: Record<string, ForecastDay[]> };
+          setRegions(parsed.regions ?? []);
+          setForecast(parsed.forecast ?? []);
+          setRegionForecasts(parsed.regionForecasts ?? {});
+          const cachedTime = localStorage.getItem('lastKnownPredictionTime');
+          setCacheAge(cachedTime);
+        } catch {
+          setRegions([]);
+          setForecast([]);
+          setRegionForecasts({});
+        }
+      } else {
+        setRegions([]);
+        setForecast([]);
+        setRegionForecasts({});
+      }
+
+      // Task 1 & 4: Exponential backoff + informative error message
+      retryDelayRef.current = Math.min(retryDelayRef.current * 2, 1_800_000);
+      setErrorMessage(`Network error. Retrying in ${Math.round(retryDelayRef.current / 60_000)} min.`);
     } finally {
       setTimeout(() => setLoading(false), 800);
+      // Task 1: Schedule next poll with current (possibly backed-off) delay
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => void fetchData(), retryDelayRef.current);
     }
   }, []);
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5 * 60 * 1000);
-    return () => clearInterval(interval);
+    void fetchData();
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
   }, [fetchData]);
 
   useEffect(() => {
@@ -419,6 +485,16 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {(errorMessage || cacheAge) && (
+        <div className={`data-status-banner ${cacheAge ? 'banner-cache' : 'banner-error'}`}>
+          {cacheAge ? (
+            <span>⚠ ข้อมูลแคช • Showing cached data from {new Date(cacheAge).toLocaleString()}{errorMessage ? ` — ${errorMessage}` : ''}</span>
+          ) : (
+            <span>⚠ {errorMessage}</span>
+          )}
+        </div>
+      )}
 
       <main className="app-main" data-tab={activeTab}>
         <AnimatePresence mode="wait">

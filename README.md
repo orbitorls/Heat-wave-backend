@@ -1,3 +1,19 @@
+## Quick Start
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env      # optional: set API_KEY, DATA_DIR, etc.
+python api_server.py      # API at http://localhost:5000
+# Swagger docs → http://localhost:5000/api/docs
+
+# Docker
+docker-compose up
+```
+
+📖 [API Reference](docs/API.md) · [Architecture](docs/ARCHITECTURE.md)
+
+---
+
 # ระบบพยากรณ์คลื่นความร้อนเชิงพื้นที่ (Thailand Heatwave Forecasting) 🌡️🇹🇭
 
 ระบบนี้เป็น Backend สำหรับพยากรณ์อุณหภูมิและคลื่นความร้อนในประเทศไทย โดยใช้โมเดล Deep Learning ชนิด **ConvLSTM** ร่วมกับข้อมูลอุตุนิยมวิทยา **ERA5** 

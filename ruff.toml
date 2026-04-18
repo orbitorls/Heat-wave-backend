@@ -1,0 +1,13 @@
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "W", "F", "I", "C90", "UP"]
+ignore = ["E501", "E402", "F401", "UP007", "UP035"]
+
+[lint.isort]
+known-first-party = ["config"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

@@ -17,6 +17,7 @@ export interface Region {
   heatLevel: HeatLevel;
   lat: number;
   lng: number;
+  probability?: number;
 }
 
 export interface OverviewProps {
@@ -367,6 +368,12 @@ export const Overview: React.FC<OverviewProps> = ({ regions, onSelectRegion }) =
                               <span className="detail-cell-label">ลองจิจูด</span>
                               <span className="detail-cell-value mono">{toSafeNumber(region.lng).toFixed(4)}</span>
                             </div>
+                            {region.probability !== undefined && (
+                              <div className="detail-cell">
+                                <span className="detail-cell-label">ความเชื่อมั่น (Confidence)</span>
+                                <span className="detail-cell-value">{Math.round(region.probability * 100)}%</span>
+                              </div>
+                            )}
                           </div>
 
                           <div className="detail-alert-box" style={{ borderColor: color, backgroundColor: bg }}>

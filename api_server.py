@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, render_template
 from flask_cors import CORS
 from flask import redirect, request
+from flasgger import Swagger, swag_from
 import threading
 import time
 import shutil
@@ -26,8 +27,59 @@ from src.data.loader import (
 from src.models.convlstm import HeatwaveConvLSTM
 from api_daily_predict import init_daily_routes  # Daily XGBoost prediction
 
+try:
+    from src.data.freshness import get_freshness_summary, is_data_stale
+    _freshness_available = True
+except ImportError:
+    _freshness_available = False
+
+try:
+    from src.monitoring.drift_detector import record_prediction as _record_drift, get_drift_status as _get_drift_status
+    _drift_available = True
+except ImportError:
+    _drift_available = False
+
 app = Flask(__name__)
-CORS(app)  # Enable CORS
+_cors_origins = os.getenv("CORS_ORIGINS", "*")
+CORS(app, origins=_cors_origins.split(",") if _cors_origins != "*" else "*")
+
+
+@app.before_request
+def _track_request() -> None:
+    _request_stats["total"] += 1
+    _request_stats["last_request_time"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+# --- Authentication ---
+_API_KEY = os.getenv("API_KEY", "")
+
+
+def require_api_key(f):
+    """Decorator: require X-API-Key header if API_KEY env var is set."""
+    import functools
+
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        if _API_KEY:
+            key = request.headers.get("X-API-Key", "")
+            if key != _API_KEY:
+                return jsonify({"error": "Unauthorized", "message": "Invalid or missing API key"}), 401
+        return f(*args, **kwargs)
+
+    return decorated
+
+swagger_config = {
+    "headers": [],
+    "specs": [{"endpoint": "apispec", "route": "/api/apispec.json", "rule_filter": lambda rule: True, "model_filter": lambda tag: True}],
+    "static_url_path": "/flasgger_static",
+    "swagger_ui": True,
+    "specs_route": "/api/docs",
+}
+swagger_template = {
+    "info": {"title": "Heatwave Forecast API", "description": "Thailand Heatwave Forecasting System API", "version": "1.0.0"},
+    "basePath": "/",
+}
+Swagger(app, config=swagger_config, template=swagger_template)
 
 DATA_DIR = "era5_data"
 MODELS_DIR = "models"
@@ -91,8 +143,11 @@ _prediction_cache = {}
 runtime_seq_len = SEQ_LEN
 runtime_future_seq = FUTURE_SEQ
 runtime_model_type = "balanced_random_forest"
+_request_stats: dict = {"total": 0, "errors": 0, "predict_calls": 0, "last_request_time": None}
+_startup_time: float = time.time()
 temperature_forecast_context: Optional[dict[str, Any]] = None
 training_lock = threading.Lock()
+_resource_lock = threading.RLock()
 # Track original model type for fallback
 _original_model_loaded = False
 # XGBoost model reference
@@ -1002,7 +1057,8 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
         return False
 
     if skip_data_reload and resources_ready():
-        _prediction_cache = {}
+        with _resource_lock:
+            _prediction_cache = {}
         print("Model reloaded without full data refresh.")
         return True
 
@@ -1088,8 +1144,8 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
             and ckpt_mean_arr.shape[1] == data_raw.shape[1]
             and ckpt_std_arr.shape[1] == data_raw.shape[1]
         ):
-            mean = ckpt_mean_arr
-            std = ckpt_std_arr
+            _new_mean = ckpt_mean_arr
+            _new_std = ckpt_std_arr
         else:
             LOGGER.warning(
                 "Checkpoint normalization stats channel mismatch (ckpt=%s, data=%s). "
@@ -1097,13 +1153,13 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
                 ckpt_mean_arr.shape,
                 data_raw.shape,
             )
-            mean = data_mean
-            std = data_std
+            _new_mean = data_mean
+            _new_std = data_std
     else:
-        mean = data_mean
-        std = data_std
+        _new_mean = data_mean
+        _new_std = data_std
     data_raw, _clip_bounds = clean_data(data_raw)
-    data = normalize_data(data_raw, mean, std)
+    data = normalize_data(data_raw, _new_mean, _new_std)
 
     # Create sequences
     # We take the last part for testing/demo
@@ -1113,40 +1169,49 @@ def load_resources(checkpoint_path=None, skip_data_reload=False):
         return False
 
     split_idx = int(len(X) * 0.85)
-    X_test = X[split_idx:]
-    Y_test = Y[split_idx:]
+    _new_X_test = X[split_idx:]
+    _new_Y_test = Y[split_idx:]
 
     # Load temperature stats - prefer Celsius from checkpoint if available
     # Train_Ai.py saves temp_mean in Celsius (converted from Kelvin at line 1588)
     checkpoint_temp_mean = metadata.get("temp_mean")
     checkpoint_temp_std = metadata.get("temp_std")
-    
+
     if checkpoint_temp_mean is not None and checkpoint_temp_std is not None:
         # Use the Celsius values saved by Train_Ai.py
-        temp_mean_scalar = float(checkpoint_temp_mean)
-        temp_std_scalar = float(checkpoint_temp_std)
-        LOGGER.info(f"Using checkpoint temperature stats: mean={temp_mean_scalar:.2f}°C, std={temp_std_scalar:.2f}")
+        _new_temp_mean = float(checkpoint_temp_mean)
+        _new_temp_std = float(checkpoint_temp_std)
+        LOGGER.info(f"Using checkpoint temperature stats: mean={_new_temp_mean:.2f}°C, std={_new_temp_std:.2f}")
     else:
         # Fallback: extract from normalization stats (likely in Kelvin)
-        temp_mean_scalar = float(mean[0, 1, 0, 0])
-        temp_std_scalar = float(std[0, 1, 0, 0])
-        LOGGER.warning(f"No checkpoint temp_mean found, using normalization stats: mean={temp_mean_scalar:.2f}")
-    
-    bbox = {
+        _new_temp_mean = float(_new_mean[0, 1, 0, 0])
+        _new_temp_std = float(_new_std[0, 1, 0, 0])
+        LOGGER.warning(f"No checkpoint temp_mean found, using normalization stats: mean={_new_temp_mean:.2f}")
+
+    _new_bbox = {
         "north": float(np.max(lats)),
         "south": float(np.min(lats)),
         "east": float(np.max(lons)),
         "west": float(np.min(lons)),
     }
-    temperature_forecast_context = None
+    _new_tfc = None
     if runtime_model_type != "convlstm":
-        temperature_forecast_context = _load_secondary_temperature_context(
+        _new_tfc = _load_secondary_temperature_context(
             primary_checkpoint_path=checkpoint_path,
             data_raw=full_data_raw,
             data_mean=full_data_mean,
             data_std=full_data_std,
         )
-    _prediction_cache = {}
+    with _resource_lock:
+        mean = _new_mean
+        std = _new_std
+        X_test = _new_X_test
+        Y_test = _new_Y_test
+        temp_mean_scalar = _new_temp_mean
+        temp_std_scalar = _new_temp_std
+        bbox = _new_bbox
+        temperature_forecast_context = _new_tfc
+        _prediction_cache = {}
 
     print(f"Loaded {len(X_test)} test samples.")
 
@@ -1429,14 +1494,18 @@ def get_prediction_sequence(sample_idx=-1, days=7):
     """Return inference payloads with observed and forecasted temperature separated."""
     if not resources_ready():
         raise RuntimeError("Model or data resources are not ready")
-    assert model is not None
-    assert X_test is not None
-    assert temp_mean_scalar is not None
-    assert temp_std_scalar is not None
-
     cache_key = (sample_idx, days)
-    if cache_key in _prediction_cache:
-        return _prediction_cache[cache_key]
+    with _resource_lock:
+        if model is None:
+            raise RuntimeError("Model not loaded. Call /api/health to check status.")
+        if X_test is None:
+            raise RuntimeError("Test data not loaded. Resources not initialized.")
+        if temp_mean_scalar is None:
+            raise RuntimeError("Temperature normalization stats not loaded.")
+        if temp_std_scalar is None:
+            raise RuntimeError("Temperature normalization stats not loaded.")
+        if cache_key in _prediction_cache:
+            return _prediction_cache[cache_key]
 
     outputs = []
 
@@ -1502,7 +1571,8 @@ def get_prediction_sequence(sample_idx=-1, days=7):
             # Autoregressive update for classifier backend
             x_seq = np.concatenate([x_seq[1:], pred_step[None, :, :, :]], axis=0)
 
-    _prediction_cache[cache_key] = outputs
+    with _resource_lock:
+        _prediction_cache[cache_key] = outputs
     return outputs
 
 
@@ -1649,15 +1719,47 @@ def _region_payload_from_grid(temp_grid, model_probability=None):
 
 @app.route("/api/predict", methods=["GET"])
 def predict_summary():
-    """Returns summary statistics for the dashboard.
-    
-    Uses XGBoost daily model if available, otherwise falls back to ConvLSTM/RF.
     """
-    # Try XGBoost first
+    Get heatwave prediction summary.
+    ---
+    tags:
+      - Prediction
+    parameters:
+      - name: days
+        in: query
+        type: integer
+        default: 7
+        description: Number of forecast days
+    responses:
+      200:
+        description: Prediction result
+        schema:
+          type: object
+          properties:
+            current_temp:
+              type: number
+            risk_level:
+              type: string
+              enum: [LOW, MODERATE, HIGH, CRITICAL]
+            probability:
+              type: number
+      503:
+        description: Resources not loaded
+    """
+    # Model selection: use ?model=convlstm|xgboost|rf|auto
+    # - auto: tries XGBoost first, falls back to ConvLSTM/RF
+    # - convlstm: forces ConvLSTM spatial model
+    # - xgboost: forces daily XGBoost tabular model
+    # - rf: forces RandomForest model
+    # Response always includes: model_used, model_version, confidence_interval
+    requested_model = request.args.get("model", "auto").lower()
+    _model_version = get_latest_model(MODELS_DIR) or "unknown"
+
+    # Try XGBoost first (unless caller forced convlstm or rf)
     try:
         from api_daily_predict import daily_model_ready, load_daily_model, predict_from_daily_weather, _daily_threshold
-        
-        if daily_model_ready() or load_daily_model():
+
+        if requested_model not in ("convlstm", "rf") and (requested_model == "xgboost" or daily_model_ready() or load_daily_model()):
             if X_test is not None and len(X_test) > 0:
                 observed_grid = _extract_observed_temperature_grid()
                 temp_max = float(np.nanmax(observed_grid))
@@ -1689,7 +1791,13 @@ def predict_summary():
             }
             
             risk_info = risk_map.get(result['risk_level'], risk_map['LOW'])
-            
+
+            if _drift_available:
+                _alert = _record_drift(float(temp_max))
+                if _alert:
+                    LOGGER.warning("Drift alert: %s", _alert.get("message"))
+
+            _request_stats["predict_calls"] += 1
             return jsonify({
                 "status": "ok",
                 "date": actual_date.strftime("%Y-%m-%d") if hasattr(actual_date, 'strftime') else str(actual_date),
@@ -1702,8 +1810,14 @@ def predict_summary():
                 "probability": result['heatwave_probability'],
                 "advice": f"Observed max temperature {temp_max:.1f}C with {result['heatwave_probability']*100:.1f}% heatwave probability. {risk_info['label']}.",
                 "model_type": "xgboost_daily",
+                "model_used": "xgboost",
+                "model_version": _model_version,
                 "temperature_source": "observed_latest_input",
                 "forecast_available": False,
+                "confidence_interval": {
+                    "lower": round(result['heatwave_probability'] - round(min(result['heatwave_probability'], 1 - result['heatwave_probability']) * 0.3, 3), 3),
+                    "upper": round(result['heatwave_probability'] + round(min(result['heatwave_probability'], 1 - result['heatwave_probability']) * 0.3, 3), 3),
+                },
                 "weather": {
                     "T2M_MAX": temp_max,
                     "T2M": temp_mean,
@@ -1750,6 +1864,12 @@ def predict_summary():
         forecast_available = bool(prediction["forecast_available"])
         temperature_source = prediction["temperature_source"]
 
+        if _drift_available:
+            _alert = _record_drift(float(max_temp))
+            if _alert:
+                LOGGER.warning("Drift alert: %s", _alert.get("message"))
+
+        _request_stats["predict_calls"] += 1
         return jsonify(
             {
                 "status": "ok",
@@ -1757,7 +1877,6 @@ def predict_summary():
                 "data_date": actual_date.strftime("%Y-%m-%d"),
                 "generated_at": datetime.datetime.now().isoformat(),
                 "risk_level": risk_level,
-                "risk_code": risk_payload["risk_code"],
                 "risk_label": risk_payload["risk_label"],
                 "risk_index": risk_payload["risk_index"],
                 "risk": {
@@ -1772,6 +1891,12 @@ def predict_summary():
                     else f"Heatwave probability is {probability*100:.1f}% based on the latest observed max temperature {observed_max:.1f} C."
                 ),
                 "model_type": runtime_model_type,
+                "model_used": runtime_model_type,
+                "model_version": _model_version,
+                "confidence_interval": {
+                    "lower": round(probability - round(min(probability, 1 - probability) * 0.3, 3), 3),
+                    "upper": round(probability + round(min(probability, 1 - probability) * 0.3, 3), 3),
+                },
                 "temperature_source": temperature_source,
                 "forecast_available": forecast_available,
                 "weather": {
@@ -1812,7 +1937,29 @@ def predict_summary():
 
 @app.route("/api/forecast", methods=["GET"])
 def forecast_summary():
-    """Returns a 7-day forecast from autoregressive model predictions."""
+    """
+    Get 7-day forecast.
+    ---
+    tags:
+      - Prediction
+    responses:
+      200:
+        description: 7-day forecast
+        schema:
+          type: object
+          properties:
+            forecast:
+              type: array
+              items:
+                type: object
+                properties:
+                  date:
+                    type: string
+                  temp:
+                    type: number
+                  risk:
+                    type: string
+    """
     if not resources_ready():
         return jsonify({"error": "Model not loaded"}), 500
 
@@ -1955,7 +2102,23 @@ def forecast_summary():
 
 @app.route("/api/map", methods=["GET"])
 def predict_map():
-    """Returns GeoJSON features for the map."""
+    """
+    Get heatwave risk map as GeoJSON.
+    ---
+    tags:
+      - Map
+    responses:
+      200:
+        description: GeoJSON FeatureCollection of risk zones
+        schema:
+          type: object
+          properties:
+            type:
+              type: string
+              example: FeatureCollection
+            features:
+              type: array
+    """
     if not resources_ready():
         return jsonify({"error": "Model not loaded"}), 500
     assert lats is not None
@@ -1986,8 +2149,9 @@ def predict_map():
             for c in range(cols):
                 val = float(temp_grid[r, c])
 
-                # Optimization: Only send polygons if temp > 30 to save bandwidth?
-                # or send all for heatmap? Let's send all for now but maybe skip very low ones if needed.
+                # Filter: skip cells below minimum risk threshold to reduce payload size
+                if val < 28.0:
+                    continue
 
                 lat = float(lats[r])
                 lon = float(lons[c])
@@ -2025,7 +2189,7 @@ def predict_map():
                 }
                 features.append(feature)
 
-        return jsonify(
+        response = jsonify(
             {
                 "type": "FeatureCollection",
                 "features": features,
@@ -2048,6 +2212,8 @@ def predict_map():
                 },
             }
         )
+        response.headers['Cache-Control'] = 'public, max-age=300'
+        return response
 
     except Exception as e:
         LOGGER.exception("Predict map failed: %s", e)
@@ -2089,6 +2255,7 @@ def training_history_api():
 
 
 @app.route("/api/training/start", methods=["POST"])
+@require_api_key
 def training_start():
     payload = request.get_json(silent=True) or {}
     config, errors = sanitize_training_config(payload)
@@ -2148,8 +2315,93 @@ def training_start():
 
 @app.route("/api/health", methods=["GET"])
 def health_check():
-    """Simple health check for frontend to detect live backend."""
-    return jsonify({"status": "ok", "model_loaded": resources_ready()})
+    """
+    Get API health status.
+    ---
+    tags:
+      - Health
+    responses:
+      200:
+        description: Health status
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: ok
+            resources_loaded:
+              type: boolean
+            model_type:
+              type: string
+    """
+    if _freshness_available:
+        freshness = get_freshness_summary()
+        data_stale = is_data_stale()
+    else:
+        freshness = {}
+        data_stale = None
+    return jsonify({
+        "status": "ok",
+        "model_loaded": resources_ready(),
+        "data_freshness": freshness,
+        "data_stale": data_stale,
+    })
+
+
+@app.route("/api/health/extended", methods=["GET"])
+def health_extended():
+    """
+    Extended health check with observability metrics.
+    ---
+    tags:
+      - Health
+    responses:
+      200:
+        description: Extended health metrics
+    """
+    uptime_seconds = int(time.time() - _startup_time)
+    uptime_str = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m {uptime_seconds % 60}s"
+
+    latest_ckpt = get_latest_model(MODELS_DIR)
+
+    if _freshness_available:
+        freshness = get_freshness_summary()
+        stale = is_data_stale()
+    else:
+        freshness = {}
+        stale = None
+
+    with training_lock:
+        t_state = dict(training_state)
+
+    result = {
+        "status": "ok" if resources_ready() else "degraded",
+        "uptime": uptime_str,
+        "uptime_seconds": uptime_seconds,
+        "resources_loaded": resources_ready(),
+        "model": {
+            "latest_checkpoint": latest_ckpt,
+            "type": runtime_model_type,
+        },
+        "data": {
+            "freshness": freshness,
+            "stale": stale,
+        },
+        "requests": {
+            "total": _request_stats["total"],
+            "errors": _request_stats["errors"],
+            "predict_calls": _request_stats["predict_calls"],
+            "last_request_time": _request_stats["last_request_time"],
+        },
+        "training": {
+            "active": t_state.get("active", t_state.get("status") == "running"),
+            "progress": t_state.get("progress", 0),
+            "last_trained": t_state.get("finished_at") or t_state.get("end_time"),
+        },
+    }
+    if _drift_available:
+        result["drift"] = _get_drift_status()
+    return jsonify(result)
 
 
 if __name__ == "__main__":

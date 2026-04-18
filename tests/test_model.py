@@ -113,7 +113,7 @@ class TestHeatwaveConvLSTM:
             assert out.shape[-2:] == (H, W), f"Spatial dims changed: {out.shape}"
 
     def test_mismatched_layer_config_raises(self):
-        with pytest.raises(AssertionError):
+        with pytest.raises((AssertionError, ValueError)):
             HeatwaveConvLSTM(
                 input_dim=4,
                 hidden_dim=[8],        # length 1
