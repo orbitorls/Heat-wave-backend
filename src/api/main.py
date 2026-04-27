@@ -1,83 +1,81 @@
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
+"""FastAPI backend for Heatwave Prediction Web App"""
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
-from pydantic import BaseModel
-import asyncio
-import json
-from typing import Dict, List, Optional, Any
+from contextlib import asynccontextmanager
+import sys
+from pathlib import Path
 
-from src.core.config import settings
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from src.models.manager import ModelManager
 from src.core.logger import logger
-from src.core.utils import detect_gpu_capability
-from src.models.manager import model_manager
-from src.api.services.training import training_service
 
-app = FastAPI(title="Thailand Heatwave Prediction API", version="2.0.0")
+# Import routes
+from .routes import models, predict, train, eval as eval_routes, data, map as map_routes, system
 
+# Global model manager instance
+model_manager = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan manager - load ModelManager on startup"""
+    global model_manager
+    logger.info("Starting FastAPI backend...")
+    try:
+        model_manager = ModelManager()
+        logger.info("ModelManager initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize ModelManager: {e}")
+        model_manager = None
+    yield
+    logger.info("Shutting down FastAPI backend...")
+
+
+app = FastAPI(
+    title="Heatwave Prediction API",
+    description="Backend API for Thailand Heatwave Prediction System",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],  # Vite dev server
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-async def startup_event():
-    model_manager.load_model()
 
 @app.get("/")
 async def root():
-    return RedirectResponse(url="/trainer")
+    """Root endpoint"""
+    return {"message": "Heatwave Prediction API", "version": "1.0.0"}
 
-@app.get("/api/health")
-async def health():
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
     return {
-        "status": "ok",
-        "gpu": detect_gpu_capability(),
-        "model_loaded": model_manager.model is not None,
-        "model_type": model_manager.model_type,
+        "status": "healthy",
+        "model_manager_loaded": model_manager is not None
     }
 
-# --- Training Endpoints ---
 
-@app.get("/api/training/status")
-async def get_training_status():
-    return training_service.get_status()
+# Register routes
+app.include_router(models.router, prefix="/api/models", tags=["models"])
+app.include_router(predict.router, prefix="/api/predict", tags=["predict"])
+app.include_router(train.router, prefix="/api/train", tags=["train"])
+app.include_router(eval_routes.router, prefix="/api/eval", tags=["eval"])
+app.include_router(data.router, prefix="/api/data", tags=["data"])
+app.include_router(map_routes.router, prefix="/api/map", tags=["map"])
+app.include_router(system.router, prefix="/api/system", tags=["system"])
 
-@app.post("/api/training/start")
-async def start_training(config: Dict):
-    try:
-        training_service.start_training(config)
-        return {"message": "Training started."}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.post("/api/training/stop")
-async def stop_training():
-    training_service.stop_training()
-    return {"message": "Stop command sent."}
-
-# WebSocket for live updates
-@app.websocket("/ws/training")
-async def websocket_training(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        while True:
-            # Send status every 1 second
-            status = training_service.get_status()
-            await websocket.send_json(status)
-            await asyncio.sleep(1)
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
-
-# --- UI Route ---
-
-@app.get("/trainer", response_class=HTMLResponse)
-async def trainer_ui():
-    with open("src/api/templates/trainer.html", "r", encoding="utf-8") as f:
-        return f.read()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=settings.API_HOST, port=settings.API_PORT)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

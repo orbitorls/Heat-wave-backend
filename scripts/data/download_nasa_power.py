@@ -77,16 +77,24 @@ def download_nasa_power(lat, lon, start_date, end_date):
         "parameters": "PRECTOT,RH2M,T2MDEW,T2M",
     }
     
+    session = requests.Session()
+    response = None
     try:
-        response = requests.get(POWER_API, params=params, timeout=30)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            print(f"Error {response.status_code} at ({lat}, {lon}): {response.text[:200]}")
+        try:
+            response = session.get(POWER_API, params=params, timeout=30)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"Error {response.status_code} at ({lat}, {lon}): {response.text[:200]}")
+                return None
+        except Exception as e:
+            print(f"Exception at ({lat}, {lon}): {e}")
             return None
-    except Exception as e:
-        print(f"Exception at ({lat}, {lon}): {e}")
-        return None
+        finally:
+            if response is not None:
+                response.close()
+    finally:
+        session.close()
 
 
 def parse_power_response(data, lat, lon):
@@ -166,7 +174,7 @@ def download_all_grids(start_year, end_year):
             # Download data
             data = download_nasa_power(lat, lon, start_date, end_date)
             
-            if data:
+            if data is not None:
                 df = parse_power_response(data, lat, lon)
                 if df is not None and len(df) > 0:
                     all_data.append(df)
@@ -222,7 +230,7 @@ def download_yearly(start_year, end_year, output_prefix="nasa_power"):
                 
                 data = download_nasa_power(lat, lon, start_date, end_date)
                 
-                if data:
+                if data is not None:
                     df = parse_power_response(data, lat, lon)
                     if df is not None and len(df) > 0:
                         all_data.append(df)
@@ -255,7 +263,7 @@ def test_single_point():
     
     data = download_nasa_power(lat, lon, start_date, end_date)
     
-    if data:
+    if data is not None:
         df = parse_power_response(data, lat, lon)
         if df is not None:
             print("Success! Sample data:")

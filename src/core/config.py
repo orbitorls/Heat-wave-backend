@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -32,6 +33,39 @@ class Settings(BaseSettings):
     DEFAULT_MODEL_VERSION: str = "latest"
     SEQUENCE_LENGTH: int = 7
     PREDICTION_HORIZON: int = 2
+
+    # Training Hyperparameters
+    BATCH_SIZE: int = 4
+    SEQ_LEN: int = 5
+    FUTURE_SEQ: int = 2
+    LEARNING_RATE: float = 0.001
+    EPOCHS: int = 10
+    RANDOM_SEED: int = 42
+
+    # XGBoost/RandomForest Hyperparameters
+    RF_N_ESTIMATORS: int = 260
+    RF_MAX_DEPTH: int = 25
+    RF_MIN_SAMPLES_LEAF: int = 2
+    MIN_TRAIN_POSITIVE_RATE: float = 0.08
+    MAX_TRAIN_POSITIVE_RATE: float = 0.40
+
+    # Heatwave Detection
+    HEATWAVE_TEMP_THRESHOLD: float = 38.0
+    HEATWAVE_ANOMALY_THRESHOLD: float = 6.0
+    HEATWAVE_MIN_DURATION: int = 3
+    EVENT_MIN_DURATION_DAYS: int = 3
+    EVENT_MIN_HOT_FRACTION: float = 0.10
+
+    # Data Split Ratios
+    TRAIN_RATIO: float = 0.75
+    VAL_RATIO: float = 0.10
+    TEST_RATIO: float = 0.15
+
+    # Training Options
+    USE_XGBOOST: bool = True
+    USE_LIGHTGBM: bool = True
+    FEATURE_ENGINEERING_ENABLED: bool = False
+    WALK_FORWARD_ENABLED: bool = False
 
     # API Settings
     API_HOST: str = "0.0.0.0"

@@ -1,5 +1,6 @@
 from src.data.loader import DataLoader, create_sequences, fill_nan_along_time
 from src.core.logger import logger as app_logger
+from src.core.config import settings
 
 import glob
 import os
@@ -24,8 +25,8 @@ try:
 except ImportError:
     LIGHTGBM_AVAILABLE = False
 
-DATA_DIR = "era5_data"
-MODELS_DIR = "models"
+DATA_DIR = str(settings.DATA_DIR)
+MODELS_DIR = str(settings.MODELS_DIR)
 
 
 def _int_env(name, default_value):
@@ -83,69 +84,64 @@ def _set_random_seeds(seed: int = 42) -> None:
         pass  # torch may not be available in all contexts
 
 
-BATCH_SIZE = _int_env("HW_BATCH_SIZE", 4)
-# Optimized hyperparameters - back to best config + fine tuning
-SEQ_LEN = _int_env("HW_SEQ_LEN", 5)  
-FUTURE_SEQ = _int_env("HW_FUTURE_SEQ", 2)
-RF_N_ESTIMATORS = _int_env("HW_RF_N_ESTIMATORS", 260)
-RF_MAX_DEPTH = _int_env("HW_RF_MAX_DEPTH", 25)  # Increased from 21
-RF_MIN_SAMPLES_LEAF = _int_env("HW_RF_MIN_SAMPLES_LEAF", 2)
+BATCH_SIZE = settings.BATCH_SIZE
+SEQ_LEN = settings.SEQ_LEN
+FUTURE_SEQ = settings.FUTURE_SEQ
+RF_N_ESTIMATORS = settings.RF_N_ESTIMATORS
+RF_MAX_DEPTH = settings.RF_MAX_DEPTH
+RF_MIN_SAMPLES_LEAF = settings.RF_MIN_SAMPLES_LEAF
 
 # Class balance optimization
-MIN_TRAIN_POSITIVE_RATE = _float_env("HW_MIN_TRAIN_POSITIVE_RATE", 0.08)  # More positive samples
-MAX_TRAIN_POSITIVE_RATE = _float_env("HW_MAX_TRAIN_POSITIVE_RATE", 0.40)
+MIN_TRAIN_POSITIVE_RATE = settings.MIN_TRAIN_POSITIVE_RATE
+MAX_TRAIN_POSITIVE_RATE = settings.MAX_TRAIN_POSITIVE_RATE
 
 # Event detection
-EVENT_MIN_DURATION_DAYS = _int_env("HW_EVENT_MIN_DURATION_DAYS", 3)  # Back to 3 days
-EVENT_MIN_HOT_FRACTION = _float_env("HW_EVENT_MIN_HOT_FRACTION", 0.10)  # Back to 10%
-RF_SAMPLING_STRATEGY = _str_env("HW_RF_SAMPLING_STRATEGY", "all")
-RF_REPLACEMENT = _bool_env("HW_RF_REPLACEMENT", True)
-CLIP_LOW_PERCENTILE = _float_env("HW_CLIP_LOW_PERCENTILE", 0.5)
-CLIP_HIGH_PERCENTILE = _float_env("HW_CLIP_HIGH_PERCENTILE", 99.5)
+EVENT_MIN_DURATION_DAYS = settings.EVENT_MIN_DURATION_DAYS
+EVENT_MIN_HOT_FRACTION = settings.EVENT_MIN_HOT_FRACTION
+RF_SAMPLING_STRATEGY = "all"
+RF_REPLACEMENT = True
+CLIP_LOW_PERCENTILE = 0.5
+CLIP_HIGH_PERCENTILE = 99.5
 MODEL_BACKEND = "balanced_rf"
-USE_XGBOOST = _bool_env("HW_USE_XGBOOST", True)  # Try XGBoost again
-USE_LIGHTGBM = _bool_env("HW_USE_LIGHTGBM", True)  # Use LightGBM - better memory efficient
+USE_XGBOOST = settings.USE_XGBOOST
+USE_LIGHTGBM = settings.USE_LIGHTGBM
 USE_GPU = False
 FORCE_GPU = False
 
-# Data Split config - try different ratios
-TRAIN_RATIO = _ratio_env("HW_TRAIN_RATIO", 0.75)  # More training data
-VAL_RATIO = _ratio_env("HW_VAL_RATIO", 0.10)
-TEST_RATIO = _ratio_env("HW_TEST_RATIO", 0.15)
-HEATWAVE_PERCENTILE = _float_env("HW_HEATWAVE_PERCENTILE", 95.0)
-RANDOM_SEED = _int_env("HW_RANDOM_SEED", 42)
-EPOCHS = _int_env("HW_EPOCHS", 20)
-LEARNING_RATE = _float_env("HW_LEARNING_RATE", 1e-3)
+# Data Split config
+TRAIN_RATIO = settings.TRAIN_RATIO
+VAL_RATIO = settings.VAL_RATIO
+TEST_RATIO = settings.TEST_RATIO
+HEATWAVE_PERCENTILE = 95.0
+RANDOM_SEED = settings.RANDOM_SEED
+EPOCHS = settings.EPOCHS
+LEARNING_RATE = settings.LEARNING_RATE
 
-# Event detection parameters (defaults)
-EVENT_MIN_DURATION_DAYS = _int_env("HW_EVENT_MIN_DURATION_DAYS", 3)
-EVENT_MIN_HOT_FRACTION = _float_env("HW_EVENT_MIN_HOT_FRACTION", 0.10)
-ALLOW_SAMPLE_MEAN_FALLBACK = _bool_env("HW_ALLOW_SAMPLE_MEAN_FALLBACK", True)
-REQUIRE_DYNAMIC_FEATURES = _bool_env("HW_REQUIRE_DYNAMIC_FEATURES", False)
-MIN_TRAIN_POSITIVE_RATE = _float_env("HW_MIN_TRAIN_POSITIVE_RATE", 0.01)
-MAX_TRAIN_POSITIVE_RATE = _float_env("HW_MAX_TRAIN_POSITIVE_RATE", 0.35)
-MIN_EVAL_POSITIVE_COUNT = _int_env("HW_MIN_EVAL_POSITIVE_COUNT", 10)
-LABELING_METHOD = _str_env("HW_LABELING_METHOD", "temperature").lower()
-HEATWAVE_HEAT_INDEX_THRESHOLD = _float_env("HW_HEATWAVE_HEAT_INDEX_THRESHOLD", 41.0)
-USE_NASA_POWER = _bool_env("HW_USE_NASA_POWER", True)  # Include NASA POWER data
-HEATWAVE_TEMPERATURE_THRESHOLD = _float_env("HW_HEATWAVE_TEMPERATURE_THRESHOLD", 35.0)
-HEATWAVE_ANOMALY_THRESHOLD = _float_env("HW_HEATWAVE_ANOMALY_THRESHOLD", 6.0)  # 6°C above normal - even stricter
+# Event detection parameters
+ALLOW_SAMPLE_MEAN_FALLBACK = True
+REQUIRE_DYNAMIC_FEATURES = False
+MIN_EVAL_POSITIVE_COUNT = 10
+LABELING_METHOD = "temperature"
+HEATWAVE_HEAT_INDEX_THRESHOLD = 41.0
+USE_NASA_POWER = True
+HEATWAVE_TEMPERATURE_THRESHOLD = settings.HEATWAVE_TEMP_THRESHOLD
+HEATWAVE_ANOMALY_THRESHOLD = settings.HEATWAVE_ANOMALY_THRESHOLD
 
 # Walk-Forward Validation config
-WALK_FORWARD_ENABLED = _bool_env("HW_WALK_FORWARD_ENABLED", False)
-WALK_FORWARD_N_FOLDS = _int_env("HW_WALK_FORWARD_N_FOLDS", 3)
-WALK_FORWARD_EXPAND_WINDOW = _bool_env("HW_WALK_FORWARD_EXPAND_WINDOW", True)
+WALK_FORWARD_ENABLED = settings.WALK_FORWARD_ENABLED
+WALK_FORWARD_N_FOLDS = 3
+WALK_FORWARD_EXPAND_WINDOW = True
 
 # Hyperparameter Tuning config
-HP_TUNING_ENABLED = _bool_env("HW_HP_TUNING_ENABLED", False)
-HP_N_ITER = _int_env("HW_HP_N_ITER", 20)
-HP_CV_FOLDS = _int_env("HW_HP_CV_FOLDS", 3)
-HP_SCORING = _str_env("HW_HP_SCORING", "f1")
+HP_TUNING_ENABLED = False
+HP_N_ITER = 20
+HP_CV_FOLDS = 3
+HP_SCORING = "f1"
 
 # Feature Engineering config
-FEATURE_ENGINEERING_ENABLED = _bool_env("HW_FEATURE_ENGINEERING_ENABLED", True)  # Enable feature engineering
-FEATURE_INTERACTIONS = _bool_env("HW_FEATURE_INTERACTIONS", True)
-FEATURE_TEMPORAL = _bool_env("HW_FEATURE_TEMPORAL", True)
+FEATURE_ENGINEERING_ENABLED = settings.FEATURE_ENGINEERING_ENABLED
+FEATURE_INTERACTIONS = True
+FEATURE_TEMPORAL = True
 
 
 @dataclass
@@ -1369,7 +1365,32 @@ def _evaluate_regional_event_metrics(y_true_temp, y_pred_prob, x_test, lats, lon
     return out
 
 
-def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = None):
+def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = None,
+          on_progress: Optional[Callable[[str, float, Optional[Dict[str, Any]]], None]] = None,
+          on_log: Optional[Callable[[str, str], None]] = None):
+    """Train heatwave prediction model with progress callbacks.
+
+    Args:
+        config: Optional config dict to override defaults
+        on_epoch_end: Callback for epoch metrics
+        on_progress: Callback for progress updates (stage, progress, metadata)
+        on_log: Callback for log messages (level, message)
+
+    Returns:
+        Training results or None if failed
+    """
+    def log(level: str, message: str):
+        """Internal logging helper."""
+        if on_log:
+            on_log(level, message)
+        else:
+            print(f"[{level.upper()}] {message}")
+
+    def progress(stage: str, value: float, metadata: Optional[Dict[str, Any]] = None):
+        """Internal progress helper."""
+        if on_progress:
+            on_progress(stage, value, metadata or {})
+
     cfg = {
         "batch_size": BATCH_SIZE,
         "seq_len": SEQ_LEN,
@@ -1417,29 +1438,26 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
     if config:
         cfg.update(config)
 
-    print("Starting Heatwave AI Training...")
+    log("info", "Starting Heatwave AI Training...")
+    progress("init", 0.0, {"stage": "initialization"})
     random_seed = int(cfg.get("random_seed", 42))
     _set_random_seeds(random_seed)
-    print(
-        f"Random seed set to {random_seed} for reproducibility"
-    )
-    print(
-        "Config: "
-        f"seq={cfg['seq_len']}, future={cfg['future_seq']}, "
-        f"rf_trees={cfg['rf_n_estimators']}, depth={cfg['rf_max_depth']}, "
-        f"backend={cfg['model_backend']}, gpu={cfg['use_gpu']}, "
-        f"force_gpu={cfg['force_gpu']}, "
-        f"labeling={cfg['labeling_method']}, "
-        f"sampling={cfg['rf_sampling_strategy']}, "
-        f"clip=({cfg['clip_low_percentile']},{cfg['clip_high_percentile']})"
-    )
+    log("info", f"Random seed set to {random_seed} for reproducibility")
+    log("info", f"Config: seq={cfg['seq_len']}, future={cfg['future_seq']}, "
+         f"rf_trees={cfg['rf_n_estimators']}, depth={cfg['rf_max_depth']}, "
+         f"backend={cfg['model_backend']}, gpu={cfg['use_gpu']}, "
+         f"force_gpu={cfg['force_gpu']}, "
+         f"labeling={cfg['labeling_method']}, "
+         f"sampling={cfg['rf_sampling_strategy']}, "
+         f"clip=({cfg['clip_low_percentile']},{cfg['clip_high_percentile']})")
 
-    print("\n[1/6] Loading ERA5 Data using new DataLoader...")
+    log("info", "\n[1/6] Loading ERA5 Data using new DataLoader...")
+    progress("loading", 0.1, {"stage": "data_loading"})
     loader = DataLoader()
     try:
         # Load the dataset lazily - use combined ERA5 + NASA POWER if enabled
         if USE_NASA_POWER:
-            print("      Loading combined ERA5 + NASA POWER data...")
+            log("info", "      Loading combined ERA5 + NASA POWER data...")
             full_ds = loader.load_combined()
         else:
             full_ds = loader.load_era5()
@@ -1449,22 +1467,19 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
         lats, lons = stats["lats"], stats["lons"]
         train_mean, train_std = None, None  # computed post-split to avoid leakage
         all_times = np.asarray(stats.get("time_index", []), dtype="datetime64[ns]")
-        
+
         # Report available variables
-        print(f"      Available dynamic variables: {stats.get('dynamic_available', [])}")
-        print(f"      Missing dynamic variables: {stats.get('dynamic_missing', [])}")
+        log("info", f"      Available dynamic variables: {stats.get('dynamic_available', [])}")
+        log("info", f"      Missing dynamic variables: {stats.get('dynamic_missing', [])}")
     except Exception as exc:
-        print(f"Error loading data with new DataLoader: {exc}")
+        log("error", f"Error loading data with new DataLoader: {exc}")
         return None
 
     quality_report = _build_data_quality_report(data_norm, stats)
-    print(
-        "      Data quality: "
-        f"missing_dynamic={quality_report['dynamic_missing_count']} "
-        f"near_zero_std_channels={len(quality_report['near_zero_std_channels'])}"
-    )
+    log("info", f"      Data quality: missing_dynamic={quality_report['dynamic_missing_count']} "
+         f"near_zero_std_channels={len(quality_report['near_zero_std_channels'])}")
     if quality_report["dynamic_missing_count"] > 0:
-        print(f"      Missing dynamics: {quality_report['dynamic_missing']}")
+        log("info", f"      Missing dynamics: {quality_report['dynamic_missing']}")
     labeling_method = str(cfg.get("labeling_method", "heat_index")).strip().lower()
     required_by_method = {
         "heat_index": {"t2m", "humidity"},
@@ -1479,9 +1494,10 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
             "Provide these variables in ERA5 input or disable strict gate via HW_REQUIRE_DYNAMIC_FEATURES=0."
         )
 
-    print(f"      Normalized Data Shape: {data_norm.shape}")
+    log("info", f"      Normalized Data Shape: {data_norm.shape}")
 
-    print("\n[2/6] Temporal split (train/val/test)...")
+    log("info", "\n[2/6] Temporal split (train/val/test)...")
+    progress("splitting", 0.2, {"stage": "data_splitting"})
     test_ratio = cfg.get("test_ratio", 0.15)
     try:
         # Split BEFORE any interpolation to prevent data leakage
@@ -1504,11 +1520,11 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
             val_times = np.array([], dtype="datetime64[ns]")
             test_times = np.array([], dtype="datetime64[ns]")
     except Exception as exc:
-        print(f"Split failed: {exc}")
+        log("error", f"Split failed: {exc}")
         return None
 
     # Fill NaN values SEPARATELY for each partition (no leakage)
-    print("      Filling NaN values within each split (causal)...")
+    log("info", "      Filling NaN values within each split (causal)...")
     for channel_idx in range(train_norm.shape[1]):
         train_norm[:, channel_idx, :, :] = fill_nan_along_time(train_norm[:, channel_idx, :, :])
         val_norm[:, channel_idx, :, :] = fill_nan_along_time(val_norm[:, channel_idx, :, :])
@@ -1516,14 +1532,11 @@ def train(config=None, on_epoch_end: Optional[Callable[[EpochMetrics], None]] = 
 
     # Log split information for reproducibility
     total_samples = len(data_norm)
-    print(
-        f"      Split config: train={cfg['train_ratio']:.0%}, "
-        f"val={cfg['val_ratio']:.0%}, test={test_ratio:.0%} | "
+    log("info", f"      Split config: train={cfg['train_ratio']:.0%}, "
+         f"val={cfg['val_ratio']:.0%}, test={test_ratio:.0%} | "
         f"Total timesteps: {total_samples}"
     )
-    print(
-        f"      Sample counts: {train_norm.shape[0]}/{val_norm.shape[0]}/{test_norm.shape[0]}"
-    )
+    log("info", f"      Sample counts: {train_norm.shape[0]}/{val_norm.shape[0]}/{test_norm.shape[0]}")
 
     # Compute normalization stats from training split only (no leakage)
     _EPSILON = 1e-8

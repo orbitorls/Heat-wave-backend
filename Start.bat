@@ -3,13 +3,15 @@ setlocal
 cd /d "%~dp0"
 
 echo ============================================
-echo   HEATWAVE-AI Launcher (XGBoost Model)
+echo   HEATWAVE-AI Launcher
 echo ============================================
 echo.
-echo   [1] Train XGBoost Model (RECOMMENDED)
-echo   [2] Train ConvLSTM/RF Model (Legacy)
-echo   [3] Run Dashboard (API + Frontend)
-echo   [4] Health Check
+echo   [1] Launch GUI (PyQt6 Desktop Application)
+echo   [2] Launch TUI (Text Interface)
+echo   [3] Train XGBoost Model
+echo   [4] Train ConvLSTM/RF Model
+echo   [5] Check Model Accuracy
+echo   [6] Download ERA5 Data
 echo   [0] Exit
 echo.
 set /p CHOICE=Select option: 
@@ -17,34 +19,59 @@ set /p CHOICE=Select option:
 if "%CHOICE%"=="1" (
   echo.
   echo ========================================
+  echo   Starting PyQt6 GUI...
+  echo   Full-featured desktop interface
+  echo ========================================
+  python -m src.gui
+  goto :eof
+)
+if "%CHOICE%"=="2" (
+  echo.
+  echo ========================================
+  echo   Starting Textual TUI...
+  echo   Full-featured terminal interface
+  echo ========================================
+  python -m src.tui.app
+  pause
+  goto :eof
+)
+if "%CHOICE%"=="3" (
+  echo.
+  echo ========================================
   echo   Training XGBoost Daily Model...
   echo   Uses single-day weather features
   echo ========================================
-  python train_daily_xgboost.py
+  python scripts/training/train_daily_xgboost.py
   echo.
   echo Training complete! Check output/ for report.
   pause
   goto :eof
 )
-if "%CHOICE%"=="2" (
-  python Train_Ai.py
-  goto :eof
-)
-if "%CHOICE%"=="3" (
-  echo.
-  echo Starting Dashboard (XGBoost model)...
-  start "Agni API" cmd /k "cd /d D:\Heat-wave-backend && python api_server.py"
-  timeout /t 2 /nobreak >nul
-  start "Agni Frontend" cmd /k "cd /d D:\Heat-wave-backend\agni-web && npm run dev"
-  timeout /t 3 /nobreak >nul
-  start http://localhost:5173
-  goto :eof
-)
 if "%CHOICE%"=="4" (
-  echo Checking API health...
-  curl http://localhost:5000/api/health
   echo.
-  curl http://localhost:5000/api/daily/health
+  echo ========================================
+  echo   Training ConvLSTM/RF Model...
+  echo   Sequence-based spatial forecasting
+  echo ========================================
+  python scripts/training/Train_Ai.py
+  pause
+  goto :eof
+)
+if "%CHOICE%"=="5" (
+  echo.
+  echo ========================================
+  echo   Checking Model Accuracy...
+  echo ========================================
+  python scripts/eval/check_model_accuracy.py
+  pause
+  goto :eof
+)
+if "%CHOICE%"=="6" (
+  echo.
+  echo ========================================
+  echo   Downloading ERA5 Data...
+  echo ========================================
+  python scripts/data/download_era5.py
   pause
   goto :eof
 )

@@ -35,9 +35,12 @@ class ConvLSTMCell(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if cur_state is None:
             batch_size, _, height, width = input_tensor.shape
-            cur_state = self.init_hidden(batch_size=batch_size, image_size=(height, width))
+            cur_state = self.init_hidden(batch_size=batch_size, image_size=(height, width), device=input_tensor.device)
 
         h_cur, c_cur = cur_state
+        # Ensure input_tensor and h_cur are on the same device before concatenation
+        target_device = h_cur.device
+        input_tensor = input_tensor.to(target_device)
         combined = torch.cat([input_tensor, h_cur], dim=1)
         combined_conv = self.conv(combined)
 
@@ -51,12 +54,14 @@ class ConvLSTMCell(nn.Module):
         h_next = o * torch.tanh(c_next)
         return h_next, c_next
 
-    def init_hidden(self, batch_size: int, image_size: Tuple[int, int]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def init_hidden(self, batch_size: int, image_size: Tuple[int, int], device: Optional[torch.device] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Initialize hidden and cell states to zeros."""
         height, width = image_size
+        if device is None:
+            device = self.conv.weight.device
         return (
-            torch.zeros(batch_size, self.hidden_dim, height, width, device=self.conv.weight.device),
-            torch.zeros(batch_size, self.hidden_dim, height, width, device=self.conv.weight.device),
+            torch.zeros(batch_size, self.hidden_dim, height, width, device=device),
+            torch.zeros(batch_size, self.hidden_dim, height, width, device=device),
         )
 
 
@@ -82,12 +87,13 @@ class HeatwaveConvLSTM(nn.Module):
 
     def forward(self, x: torch.Tensor, future_seq: int = 1) -> torch.Tensor:
         batch_size, seq_len, _, height, width = x.shape
+        device = x.device
 
         states = []
         for i in range(self.num_layers):
             cell = self.encoder_cells[i]
             assert isinstance(cell, ConvLSTMCell)
-            states.append(cell.init_hidden(batch_size, (height, width)))
+            states.append(cell.init_hidden(batch_size, (height, width), device=device))
 
         for t in range(seq_len):
             layer_input = x[:, t]

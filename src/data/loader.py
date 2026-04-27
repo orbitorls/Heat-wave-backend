@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Tuple, Optional, List, Dict
 from src.core.config import settings
 from src.core.logger import logger
+import hashlib
+import pickle
 
 EPSILON = 1e-6
 
@@ -37,35 +39,91 @@ LON_DIM_CANDIDATES = ("longitude", "lon")
 def fill_nan_along_time(field: np.ndarray) -> np.ndarray:
     """
     Fill NaN values in a (Time, H, W) field using linear interpolation along time.
+    Optimized to use vectorized operations where possible.
     """
     time_steps = field.shape[0]
     flat = field.reshape(time_steps, -1)
     time_idx = np.arange(time_steps)
 
-    for col in range(flat.shape[1]):
-        series = flat[:, col]
-        if not np.isnan(series).any():
-            continue
-
-        valid = ~np.isnan(series)
-        if not np.any(valid):
-            flat[:, col] = 0.0
-            continue
-
-        if np.sum(valid) == 1:
-            flat[:, col] = series[valid][0]
-            continue
-
-        interpolated = np.interp(time_idx, time_idx[valid], series[valid])
-        flat[:, col] = interpolated
+    # Vectorized approach: find valid indices and interpolate all columns at once
+    # Create mask of valid values
+    valid_mask = ~np.isnan(flat)
+    
+    # If no NaN values, return immediately
+    if np.all(valid_mask):
+        return field
+    
+    # For columns that are entirely NaN, fill with 0
+    col_valid_counts = np.sum(valid_mask, axis=0)
+    all_nan_cols = col_valid_counts == 0
+    flat[:, all_nan_cols] = 0.0
+    
+    # For columns with only one valid value, fill with that value
+    single_valid_cols = col_valid_counts == 1
+    for col_idx in np.where(single_valid_cols)[0]:
+        valid_val = flat[valid_mask[:, col_idx], col_idx][0]
+        flat[:, col_idx] = valid_val
+    
+    # Vectorized interpolation for remaining columns with multiple valid values
+    multi_valid_cols = col_valid_counts > 1
+    if np.any(multi_valid_cols):
+        for col_idx in np.where(multi_valid_cols)[0]:
+            series = flat[:, col_idx]
+            valid = valid_mask[:, col_idx]
+            flat[:, col_idx] = np.interp(time_idx, time_idx[valid], series[valid])
 
     return flat.reshape(field.shape)
 
 class DataLoader:
-    def __init__(self):
+    def __init__(self, use_cache: bool = True):
         self.lat_min, self.lat_max = settings.LAT_BOUNDS
         self.lon_min, self.lon_max = settings.LON_BOUNDS
         self.data_dir = settings.DATA_DIR
+        self.use_cache = use_cache
+        self.cache_dir = Path(settings.DATA_DIR) / ".cache"
+        if self.use_cache:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"DataLoader cache enabled: {self.cache_dir}")
+
+    def _get_cache_key(self, ds: xr.Dataset, fill_nan: bool, variable_specs: Optional[List]) -> str:
+        """Generate a unique cache key for the dataset."""
+        key_data = {
+            "shape": ds.dims,
+            "time_range": (str(ds.time[0].values), str(ds.time[-1].values)),
+            "variables": list(ds.data_vars),
+            "fill_nan": fill_nan,
+            "variable_specs": str(variable_specs),
+        }
+        key_str = str(key_data).encode()
+        return hashlib.md5(key_str).hexdigest()
+
+    def _load_from_cache(self, cache_key: str) -> Optional[Tuple[np.ndarray, Dict]]:
+        """Load data from cache if available."""
+        if not self.use_cache:
+            return None
+        cache_file = self.cache_dir / f"{cache_key}.pkl"
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'rb') as f:
+                    data, stats = pickle.load(f)
+                logger.info(f"Loaded data from cache: {cache_file.name}")
+                return data, stats
+            except Exception as e:
+                logger.warning(f"Failed to load from cache: {e}")
+                cache_file.unlink(missing_ok=True)
+        return None
+
+    def _save_to_cache(self, cache_key: str, data: np.ndarray, stats: Dict) -> None:
+        """Save data to cache."""
+        if not self.use_cache:
+            return
+        cache_file = self.cache_dir / f"{cache_key}.pkl"
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump((data, stats), f, protocol=pickle.HIGHEST_PROTOCOL)
+            logger.info(f"Saved data to cache: {cache_file.name}")
+        except Exception as e:
+            logger.warning(f"Failed to save to cache: {e}")
 
     def _rename_standard_dims(self, ds: xr.Dataset) -> xr.Dataset:
         """Normalize common coordinate and time names."""
@@ -94,6 +152,13 @@ class DataLoader:
 
     def _select_nc_files(self, year: Optional[int] = None) -> List[Path]:
         pattern = f"*{year}*.nc" if year else "*.nc"
+        
+        # FIX 1: Check directory exists before glob to avoid cryptic errors
+        if not self.data_dir.exists():
+            raise FileNotFoundError(f"Data directory does not exist: {self.data_dir}")
+        if not self.data_dir.is_dir():
+            raise NotADirectoryError(f"Data path is not a directory: {self.data_dir}")
+        
         files = list(self.data_dir.glob(pattern))
 
         def _priority(path: Path) -> Tuple[int, str]:
@@ -168,21 +233,40 @@ class DataLoader:
             try:
                 # Attempt to open with chunks (lazy), fallback to eager if dask fails
                 try:
-                    ds = xr.open_dataset(f, chunks={"time": 24})
-                except (ImportError, Exception):
-                    ds = xr.open_dataset(f)
-                
-                processed = self._preprocess_ds(ds)
-                if processed.dims:
-                    datasets.append(processed)
-                else:
-                    skipped += 1
+                    with xr.open_dataset(f, chunks={"time": 24}) as ds:
+                        processed = self._preprocess_ds(ds)
+                        if processed.dims:
+                            datasets.append(processed)
+                        else:
+                            skipped += 1
+                except ImportError:
+                    # Fall back to eager loading if dask is not available
+                    with xr.open_dataset(f) as ds:
+                        processed = self._preprocess_ds(ds)
+                        if processed.dims:
+                            datasets.append(processed)
+                        else:
+                            skipped += 1
+            except OSError as e:
+                # FIX 2: Specific OSError for file I/O issues
+                logger.error(f"OS error processing {f.name}: {e}")
+                skipped += 1
+            except ValueError as e:
+                # Specific ValueError for data processing issues
+                logger.error(f"Data error in {f.name}: {e}")
+                skipped += 1
             except Exception as e:
                 logger.error(f"Error processing {f.name}: {e}")
                 skipped += 1
 
         if not datasets:
-            raise ValueError("No valid data could be processed.")
+            # FIX 4: Better error when all files fail
+            total_attempted = len(files)
+            raise ValueError(
+                f"No valid data could be processed. "
+                f"Attempted {total_attempted} file(s), skipped {skipped} due to errors. "
+                f"Check that NetCDF files are valid ERA5 data and readable."
+            )
         if skipped > 0:
             logger.warning(f"Skipped {skipped} file(s) due to incompatible schema or empty crop.")
 
@@ -201,7 +285,7 @@ class DataLoader:
         full_ds = full_ds.isel(time=np.sort(index))
         
         return full_ds
-
+    
     def load_nasa_power(self, year: Optional[int] = None) -> xr.Dataset:
         """Load NASA POWER datasets lazily."""
         pattern = f"nasa_power*{year}*.nc" if year else "nasa_power*.nc"
@@ -218,18 +302,25 @@ class DataLoader:
             try:
                 # Attempt to open with chunks (lazy), fallback to eager if dask fails
                 try:
-                    ds = xr.open_dataset(f, chunks={"time": 24})
-                except (ImportError, Exception):
-                    ds = xr.open_dataset(f)
-                
-                ds = self._rename_standard_dims(ds)
-                
-                # Crop spatially
-                lat_slice = slice(self.lat_max, self.lat_min) if ds.latitude[0] > ds.latitude[-1] else slice(self.lat_min, self.lat_max)
-                ds = ds.sel(latitude=lat_slice, longitude=slice(self.lon_min, self.lon_max))
-                
-                if ds.sizes.get("latitude", 0) > 0 and ds.sizes.get("longitude", 0) > 0:
-                    datasets.append(ds)
+                    with xr.open_dataset(f, chunks={"time": 24}) as ds:
+                        ds = self._rename_standard_dims(ds)
+                        # Crop spatially
+                        lat_slice = slice(self.lat_max, self.lat_min) if ds.latitude[0] > ds.latitude[-1] else slice(self.lat_min, self.lat_max)
+                        ds = ds.sel(latitude=lat_slice, longitude=slice(self.lon_min, self.lon_max))
+                        if ds.sizes.get("latitude", 0) > 0 and ds.sizes.get("longitude", 0) > 0:
+                            datasets.append(ds)
+                except ImportError:
+                    # Fall back to eager loading if dask is not available
+                    with xr.open_dataset(f) as ds:
+                        ds = self._rename_standard_dims(ds)
+                        lat_slice = slice(self.lat_max, self.lat_min) if ds.latitude[0] > ds.latitude[-1] else slice(self.lat_min, self.lat_max)
+                        ds = ds.sel(latitude=lat_slice, longitude=slice(self.lon_min, self.lon_max))
+                        if ds.sizes.get("latitude", 0) > 0 and ds.sizes.get("longitude", 0) > 0:
+                            datasets.append(ds)
+            except OSError as e:
+                logger.error(f"OS error loading {f.name}: {e}")
+            except ValueError as e:
+                logger.error(f"Data error loading {f.name}: {e}")
             except Exception as e:
                 logger.error(f"Error loading {f.name}: {e}")
         
@@ -308,70 +399,29 @@ class DataLoader:
         logger.info(f"Combined dataset variables: {list(combined.data_vars)}")
         
         return combined
-        """Load and merge ERA5 datasets lazily."""
-        files = self._select_nc_files(year=year)
-        
-        if not files:
-            raise FileNotFoundError(f"No NetCDF files found in {self.data_dir}")
 
-        logger.info(f"Loading {len(files)} files from {self.data_dir}...")
-        
-        datasets = []
-        skipped = 0
-        for f in sorted(files):
-            try:
-                # Attempt to open with chunks (lazy), fallback to eager if dask fails
-                try:
-                    ds = xr.open_dataset(f, chunks={"time": 24})
-                except (ImportError, Exception):
-                    ds = xr.open_dataset(f)
-                
-                processed = self._preprocess_ds(ds)
-                if processed.dims:
-                    datasets.append(processed)
-                else:
-                    skipped += 1
-            except Exception as e:
-                logger.error(f"Error processing {f.name}: {e}")
-                skipped += 1
-
-        if not datasets:
-            raise ValueError("No valid data could be processed.")
-        if skipped > 0:
-            logger.warning(f"Skipped {skipped} file(s) due to incompatible schema or empty crop.")
-
-        # Merge all datasets
-        full_ds = xr.concat(
-            datasets,
-            dim="time",
-            data_vars="minimal",
-            coords="minimal",
-            compat="override",
-            join="outer",
-        ).sortby("time")
-        
-        # Remove duplicates
-        _, index = np.unique(full_ds.time, return_index=True)
-        full_ds = full_ds.isel(time=np.sort(index))
-        
-        return full_ds
-
-    def prepare_training_data(self, ds: xr.Dataset, fill_nan: bool = True, 
+    def prepare_training_data(self, ds: xr.Dataset, fill_nan: bool = True,
                                variable_specs: Optional[List[Tuple[str, List[str]]]] = None) -> Tuple[np.ndarray, Dict]:
         """Convert xarray dataset to raw numpy array for training (NOT normalized).
-        
+
         Normalization is deferred to compute_train_normalization_stats() to avoid
         data leakage from test/val splits during training.
-        
+
         Args:
             ds: xarray Dataset with ERA5 data
             fill_nan: If False, skip NaN filling (do it after temporal split to prevent leakage)
             variable_specs: Override variable specifications (default: ERA5 specs)
-        
+
         Returns:
             data_array: Numpy array of shape (Time, Channels, H, W)
             stats: Dictionary with metadata including time_index for proper splitting
         """
+        # Check cache first
+        cache_key = self._get_cache_key(ds, fill_nan, variable_specs)
+        cached_data = self._load_from_cache(cache_key)
+        if cached_data is not None:
+            return cached_data
+
         logger.info("Preparing training data (dynamic + static channels)...")
         
         # Auto-detect variable specs based on available variables
@@ -411,7 +461,7 @@ class DataLoader:
                     reference = ds[ref_source].values
                 channels.append(np.zeros_like(reference))
 
-        # 2. Add static channels (Elevation, Lat, Lon)
+        # 2. Add static channels (Elevation, Lat, Lon) - broadcast once instead of repeating
         lats, lons = ds.latitude.values, ds.longitude.values
         lat_grid, lon_grid = np.meshgrid(lats, lons, indexing='ij')
         
@@ -424,9 +474,12 @@ class DataLoader:
             elev = ds[z_source].mean(dim='time').values
 
         t_len = len(ds.time)
-        channels.append(np.repeat(elev[np.newaxis, ...], t_len, axis=0))
-        channels.append(np.repeat(lat_grid[np.newaxis, ...], t_len, axis=0))
-        channels.append(np.repeat(lon_grid[np.newaxis, ...], t_len, axis=0))
+        # Broadcast static channels using np.broadcast_to for memory efficiency
+        elev_t = np.broadcast_to(elev, (t_len, *elev.shape))
+        lat_t = np.broadcast_to(lat_grid, (t_len, *lat_grid.shape))
+        lon_t = np.broadcast_to(lon_grid, (t_len, *lon_grid.shape))
+        
+        channels.extend([elev_t, lat_t, lon_t])
 
         # Stack to (Time, Channels, H, W)
         data_array = np.stack(channels, axis=1).astype(np.float32)
@@ -443,7 +496,10 @@ class DataLoader:
             "dynamic_missing": dynamic_missing,
             "dynamic_sources": dynamic_sources,
         }
-        
+
+        # Save to cache
+        self._save_to_cache(cache_key, data_array, stats)
+
         return data_array, stats
 
 
@@ -466,6 +522,17 @@ class DataLoader:
 
 def create_sequences(data: np.ndarray, seq_len: int = 10, pred_len: int = 5):
     """Create input/target sequences using sliding window."""
+    # FIX 3: Validate input shape
+    if data.ndim < 4:
+        raise ValueError(
+            f"Expected data with 4 dimensions (Time, Channels, H, W), got {data.ndim}D: "
+            f"shape={data.shape if hasattr(data, 'shape') else 'unknown'}"
+        )
+    
+    # Validate expected dimensions
+    if data.shape[1] < 1:
+        raise ValueError(f"Channel dimension must be >= 1, got {data.shape[1]}")
+    
     total_window = seq_len + pred_len
     num_samples = len(data) - total_window + 1
     

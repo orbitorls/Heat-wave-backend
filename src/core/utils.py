@@ -1,12 +1,12 @@
 import torch
 import shutil
 import subprocess
-import numpy as np
 from typing import Dict, Tuple
 
 def detect_gpu_capability() -> Dict:
     """Detect if GPU is available via torch or nvidia-smi."""
     torch_cuda = bool(torch.cuda.is_available())
+    gpu_name = "Unknown"
     nvidia_smi = False
     
     candidates = [
@@ -29,12 +29,14 @@ def detect_gpu_capability() -> Dict:
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 nvidia_smi = True
+                gpu_name = proc.stdout.strip().split("\n")[0]
                 break
         except Exception:
             continue
 
     return {
-        "gpu_detected": bool(torch_cuda or nvidia_smi),
+        "available": bool(torch_cuda or nvidia_smi),
+        "gpu_name": gpu_name if (torch_cuda or nvidia_smi) else "None",
         "torch_cuda": torch_cuda,
         "nvidia_smi": nvidia_smi,
     }

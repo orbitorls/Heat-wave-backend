@@ -156,8 +156,8 @@ def parse_args():
     parser.add_argument(
         "--mode",
         choices=["train", "dashboard", "predict", "cli", "web"],
-        default="dashboard",
-        help="Execution mode",
+        default="web",
+        help="Execution mode (web is recommended)",
     )
     parser.add_argument(
         "--config",

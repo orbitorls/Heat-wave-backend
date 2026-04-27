@@ -20,13 +20,14 @@ import glob
 import time
 import numpy as np
 from datetime import datetime
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Callable
 from dataclasses import dataclass
 
 # Add paths
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.data.loader import DataLoader, fill_nan_along_time
+from src.core.config import settings
 
 try:
     import xgboost as xgb
@@ -44,15 +45,15 @@ except ImportError:
     print("Error: sklearn required. Install with: pip install scikit-learn")
 
 
-# Configuration
-DATA_DIR = "era5_data"
-MODELS_DIR = "models"
-HEATWAVE_TEMP_THRESHOLD = 38.0  # Celsius - Thailand hot season (realistic for 35+ days)
-HEATWAVE_MIN_DURATION = 3  # Consecutive days
-TRAIN_RATIO = 0.75
-VAL_RATIO = 0.10
-TEST_RATIO = 0.15
-RANDOM_SEED = 42
+# Configuration (defaults, can be overridden by settings or config dict)
+DATA_DIR = str(settings.DATA_DIR)
+MODELS_DIR = str(settings.MODELS_DIR)
+HEATWAVE_TEMP_THRESHOLD = settings.HEATWAVE_TEMP_THRESHOLD
+HEATWAVE_MIN_DURATION = settings.HEATWAVE_MIN_DURATION
+TRAIN_RATIO = settings.TRAIN_RATIO
+VAL_RATIO = settings.VAL_RATIO
+TEST_RATIO = settings.TEST_RATIO
+RANDOM_SEED = settings.RANDOM_SEED
 
 
 @dataclass
@@ -227,21 +228,42 @@ def create_heatwave_labels_with_duration(
 
 def train_xgboost_daily(
     config: Optional[Dict[str, Any]] = None,
-    on_epoch_end=None
+    on_progress: Optional[Callable[[str, float, Optional[Dict[str, Any]]], None]] = None,
+    on_log: Optional[Callable[[str, str], None]] = None
 ) -> Optional[Dict[str, Any]]:
     """
     Train XGBoost model for daily heatwave prediction.
-    
+
     Uses SAME DATA as the ConvLSTM model but with DAILY FEATURES
     instead of sequences. This makes it suitable for real-time prediction
     from current weather conditions.
+
+    Args:
+        config: Optional config dict to override defaults
+        on_progress: Callback for progress updates (stage, progress, metadata)
+        on_log: Callback for log messages (level, message)
+
+    Returns:
+        Dict with training results or None if failed
     """
+    def log(level: str, message: str):
+        """Internal logging helper."""
+        if on_log:
+            on_log(level, message)
+        else:
+            print(f"[{level.upper()}] {message}")
+
+    def progress(stage: str, value: float, metadata: Optional[Dict[str, Any]] = None):
+        """Internal progress helper."""
+        if on_progress:
+            on_progress(stage, value, metadata or {})
+
     if not XGBOOST_AVAILABLE:
-        print("Error: XGBoost not installed. Run: pip install xgboost")
+        log("error", "XGBoost not installed. Run: pip install xgboost")
         return None
-    
+
     if not SKLEARN_AVAILABLE:
-        print("Error: sklearn not installed. Run: pip install scikit-learn")
+        log("error", "sklearn not installed. Run: pip install scikit-learn")
         return None
     
     cfg = {
@@ -253,66 +275,69 @@ def train_xgboost_daily(
         "val_ratio": VAL_RATIO,
         "test_ratio": TEST_RATIO,
         "random_seed": RANDOM_SEED,
-        "n_estimators": 200,
-        "max_depth": 10,
-        "learning_rate": 0.1,
+        "n_estimators": settings.RF_N_ESTIMATORS if hasattr(settings, 'RF_N_ESTIMATORS') else 200,
+        "max_depth": settings.RF_MAX_DEPTH if hasattr(settings, 'RF_MAX_DEPTH') else 10,
+        "learning_rate": settings.LEARNING_RATE if hasattr(settings, 'LEARNING_RATE') else 0.1,
         "min_child_weight": 1,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
     }
     if config:
         cfg.update(config)
-    
-    print("=" * 60)
-    print("XGBoost Daily Heatwave Prediction Training")
-    print("=" * 60)
-    print(f"Config:")
-    print(f"  - Temperature threshold: {cfg['heatwave_temp_threshold']}C")
-    print(f"  - Min consecutive days: {cfg['heatwave_min_duration']}")
-    print(f"  - Train/Val/Test: {cfg['train_ratio']:.0%}/{cfg['val_ratio']:.0%}/{cfg['test_ratio']:.0%}")
-    print(f"  - XGBoost n_estimators: {cfg['n_estimators']}")
-    print(f"  - XGBoost max_depth: {cfg['max_depth']}")
-    print()
-    
+
+    log("info", "=" * 60)
+    log("info", "XGBoost Daily Heatwave Prediction Training")
+    log("info", "=" * 60)
+    log("info", f"Config:")
+    log("info", f"  - Temperature threshold: {cfg['heatwave_temp_threshold']}C")
+    log("info", f"  - Min consecutive days: {cfg['heatwave_min_duration']}")
+    log("info", f"  - Train/Val/Test: {cfg['train_ratio']:.0%}/{cfg['val_ratio']:.0%}/{cfg['test_ratio']:.0%}")
+    log("info", f"  - XGBoost n_estimators: {cfg['n_estimators']}")
+    log("info", f"  - XGBoost max_depth: {cfg['max_depth']}")
+
+    progress("init", 0.0, {"stage": "initialization"})
+
     # Set random seed
     np.random.seed(cfg["random_seed"])
-    
+
     # [1/5] Load data
-    print("[1/5] Loading ERA5 + NASA POWER data...")
+    log("info", "[1/5] Loading ERA5 + NASA POWER data...")
+    progress("loading", 0.2, {"stage": "data_loading"})
     from pathlib import Path
     loader = DataLoader()
     loader.data_dir = Path(cfg["data_dir"])
-    
+
     try:
         full_ds = loader.load_combined()
         data_raw, stats = loader.prepare_training_data(full_ds, fill_nan=False)
         lats, lons = stats["lats"], stats["lons"]
-        print(f"  - Data shape: {data_raw.shape}")
-        print(f"  - Time steps: {data_raw.shape[0]}")
-        print(f"  - Channels: {data_raw.shape[1]}")
-        print(f"  - Grid: {data_raw.shape[2]} x {data_raw.shape[3]}")
+        log("info", f"  - Data shape: {data_raw.shape}")
+        log("info", f"  - Time steps: {data_raw.shape[0]}")
+        log("info", f"  - Channels: {data_raw.shape[1]}")
+        log("info", f"  - Grid: {data_raw.shape[2]} x {data_raw.shape[3]}")
     except Exception as e:
-        print(f"Error loading data: {e}")
+        log("error", f"Error loading data: {e}")
         return None
     
     # [2/5] Temporal split and fill NaN
-    print("\n[2/5] Temporal split (train/val/test)...")
+    log("info", "\n[2/5] Temporal split (train/val/test)...")
+    progress("splitting", 0.4, {"stage": "data_splitting"})
     train_end = int(data_raw.shape[0] * cfg["train_ratio"])
     val_end = int(data_raw.shape[0] * (cfg["train_ratio"] + cfg["val_ratio"]))
-    
+
     train_data = data_raw[:train_end].copy()
     val_data = data_raw[train_end:val_end].copy()
     test_data = data_raw[val_end:].copy()
-    
+
     # Fill NaN separately per split (no leakage)
     for ch in range(train_data.shape[1]):
         train_data[:, ch, :, :] = fill_nan_along_time(train_data[:, ch, :, :])
         val_data[:, ch, :, :] = fill_nan_along_time(val_data[:, ch, :, :])
         test_data[:, ch, :, :] = fill_nan_along_time(test_data[:, ch, :, :])
-    
-    print(f"  - Train: {train_data.shape[0]} days")
-    print(f"  - Val: {val_data.shape[0]} days")
-    print(f"  - Test: {test_data.shape[0]} days")
+
+    log("info", f"  - Train: {train_data.shape[0]} days")
+    log("info", f"  - Val: {val_data.shape[0]} days")
+    log("info", f"  - Test: {test_data.shape[0]} days")
     
     # Compute normalization from training split only
     train_mean = train_data.mean(axis=(0, 2, 3), keepdims=True)
@@ -324,10 +349,11 @@ def train_xgboost_daily(
     test_norm = (test_data - train_mean) / train_std
     
     # [3/5] Extract daily features
-    print("\n[3/5] Extracting daily features...")
+    log("info", "\n[3/5] Extracting daily features...")
+    progress("features", 0.6, {"stage": "feature_extraction"})
     
     def extract_features_from_normalized(data_raw, temp_mean_k, temp_std_k):
-        """Extract features from raw (not normalized) data."""
+        """Extract features from raw (not normalized) data - vectorized."""
         # Use raw data for temperature in Kelvin
         temp_channel = 1
         temp_data = data_raw[:, temp_channel, :, :].copy()  # Already in Kelvin
@@ -336,79 +362,79 @@ def train_xgboost_daily(
         temp_c = temp_data - 273.15
         
         n_time = data_raw.shape[0]
-        features_list = []
         
         # Debug: print temperature range
         valid_temps = temp_data[temp_data > 0]  # Exclude zeros/NaNs
         if len(valid_temps) > 0:
-            print(f"    Temperature range: {valid_temps.min():.1f}K to {valid_temps.max():.1f}K ({valid_temps.min()-273.15:.1f}C to {valid_temps.max()-273.15:.1f}C)")
+            log("info", f"    Temperature range: {valid_temps.min():.1f}K to {valid_temps.max():.1f}K ({valid_temps.min()-273.15:.1f}C to {valid_temps.max()-273.15:.1f}C)")
         
-        for t in range(n_time):
-            temp_t = temp_c[t]
-            
-            # Get valid (non-zero) temperatures for this day
-            valid_mask = temp_t > -273  # Valid Celsius temps (> -273.15)
-            valid_temps_t = temp_t[valid_mask]
-            
-            if len(valid_temps_t) == 0:
-                # Fallback: use zeros for thisday (will be handled later)
-                temp_mean_t = 0.0
-                temp_max_t = 0.0
-                temp_min_t = 0.0
-                temp_std_t = 0.0
-                temp_range_t = 0.0
-                hot_frac = 0.0
-            else:
-                temp_mean_t = np.nanmean(valid_temps_t)
-                temp_max_t = np.nanmax(valid_temps_t)
-                temp_min_t = np.nanmin(valid_temps_t)
-                temp_std_t = np.nanstd(valid_temps_t)
-                temp_range_t = temp_max_t - temp_min_t
-                hot_frac = np.nanmean(valid_temps_t >= cfg["heatwave_temp_threshold"])
-            
-            # Temperature features
-            feat = {
-                "temp_mean": temp_mean_t,
-                "temp_max": temp_max_t,
-                "temp_min": temp_min_t,
-                "temp_std": temp_std_t,
-                "temp_range": temp_range_t,
-                "hot_fraction": hot_frac,
-            }
-            
-            # Other channels (from raw data)
-            if data_raw.shape[1] > 0:
-                feat["z_mean"] = np.nanmean(data_raw[t, 0, :, :])
-                feat["z_std"] = np.nanstd(data_raw[t, 0, :, :])
-            if data_raw.shape[1] > 2:
-                feat["swvl1_mean"] = np.nanmean(data_raw[t, 2, :, :])
-            if data_raw.shape[1] > 3:
-                feat["tp_mean"] = np.nanmean(data_raw[t, 3, :, :])
-            if data_raw.shape[1] > 4:
-                feat["humidity_mean"] = np.nanmean(data_raw[t, 4, :, :])
-            
-            features_list.append(list(feat.values()))
+        # Vectorized temperature statistics across time
+        valid_mask = temp_c > -273  # Valid Celsius temps
         
-        # Compute mean temperature excluding zeros (ocean/invalid pixels)
-        # temp_c contains temps in Celsius, zeros are invalid
-        daily_mean_temps = []
-        for t in range(n_time):
-            temp_t = temp_c[t]
-            valid_mask = temp_t > -273  # Valid temps (> -273.15)
-            valid_temps = temp_t[valid_mask]
-            if len(valid_temps) > 0:
-                daily_mean_temps.append(np.nanmean(valid_temps))
-            else:
-                daily_mean_temps.append(np.nan)  # Mark missing
+        # Handle all time steps at once
+        temp_mean_t = np.where(
+            np.any(valid_mask, axis=(1, 2)),
+            np.nanmean(np.where(valid_mask, temp_c, np.nan), axis=(1, 2)),
+            0.0
+        )
+        temp_max_t = np.where(
+            np.any(valid_mask, axis=(1, 2)),
+            np.nanmax(np.where(valid_mask, temp_c, np.nan), axis=(1, 2)),
+            0.0
+        )
+        temp_min_t = np.where(
+            np.any(valid_mask, axis=(1, 2)),
+            np.nanmin(np.where(valid_mask, temp_c, np.nan), axis=(1, 2)),
+            0.0
+        )
+        temp_std_t = np.where(
+            np.any(valid_mask, axis=(1, 2)),
+            np.nanstd(np.where(valid_mask, temp_c, np.nan), axis=(1, 2)),
+            0.0
+        )
+        temp_range_t = temp_max_t - temp_min_t
+        hot_frac = np.where(
+            np.any(valid_mask, axis=(1, 2)),
+            np.nanmean(np.where(valid_mask, temp_c >= cfg["heatwave_temp_threshold"], 0), axis=(1, 2)),
+            0.0
+        )
         
-        daily_mean_temps = np.array(daily_mean_temps)
+        # Vectorized other channel statistics
+        z_mean = np.zeros(n_time, dtype=np.float32)
+        z_std = np.zeros(n_time, dtype=np.float32)
+        swvl1_mean = np.zeros(n_time, dtype=np.float32)
+        tp_mean = np.zeros(n_time, dtype=np.float32)
+        humidity_mean = np.zeros(n_time, dtype=np.float32)
+        
+        if data_raw.shape[1] > 0:
+            z_mean = np.nanmean(data_raw[:, 0, :, :], axis=(1, 2))
+            z_std = np.nanstd(data_raw[:, 0, :, :], axis=(1, 2))
+        if data_raw.shape[1] > 2:
+            swvl1_mean = np.nanmean(data_raw[:, 2, :, :], axis=(1, 2))
+        if data_raw.shape[1] > 3:
+            tp_mean = np.nanmean(data_raw[:, 3, :, :], axis=(1, 2))
+        if data_raw.shape[1] > 4:
+            humidity_mean = np.nanmean(data_raw[:, 4, :, :], axis=(1, 2))
+        
+        # Stack features
+        features = np.column_stack([
+            temp_mean_t, temp_max_t, temp_min_t, temp_std_t, temp_range_t,
+            hot_frac, z_mean, z_std, swvl1_mean, tp_mean, humidity_mean
+        ]).astype(np.float32)
+        
+        # Compute mean temperature per day (vectorized)
+        daily_mean_temps = np.where(
+            np.any(valid_mask, axis=(1, 2)),
+            np.nanmean(np.where(valid_mask, temp_c, np.nan), axis=(1, 2)),
+            np.nan
+        )
         
         # Remove NaN from output
         valid_day_mask = ~np.isnan(daily_mean_temps)
         if not np.all(valid_day_mask):
-            print(f"    Warning: {np.sum(~valid_day_mask)} days have no valid temperature data")
+            log("warning", f"    Warning: {np.sum(~valid_day_mask)} days have no valid temperature data")
         
-        return np.array(features_list, dtype=np.float32), daily_mean_temps
+        return features, daily_mean_temps
     
     # Get temperature mean/std in Kelvin
     temp_mean_k = float(train_mean[0, 1, 0, 0])
@@ -419,11 +445,12 @@ def train_xgboost_daily(
     X_train, train_temps_c = extract_features_from_normalized(train_data, temp_mean_k, temp_std_k)
     X_val, val_temps_c = extract_features_from_normalized(val_data, temp_mean_k, temp_std_k)
     X_test, test_temps_c = extract_features_from_normalized(test_data, temp_mean_k, temp_std_k)
-    
-    print(f"  - Feature shape: {X_train.shape}")
-    
+
+    log("info", f"  - Feature shape: {X_train.shape}")
+
     # [4/5] Create labels
-    print("\n[4/5] Creating heatwave labels...")
+    log("info", "\n[4/5] Creating heatwave labels...")
+    progress("labels", 0.7, {"stage": "label_creation"})
     
     # Use MAX temperature (not mean) for Thailand heatwave detection
     # Thailand can reach 40-44C during hot season
@@ -433,15 +460,15 @@ def train_xgboost_daily(
     
     # Debug: print temperature stats
     valid_max_temps = train_max_temps[train_max_temps > -273]
-    print(f"  - Max Temperature range: {valid_max_temps.min():.1f}C to {valid_max_temps.max():.1f}C")
-    print(f"  - Mean Max Temperature: {valid_max_temps.mean():.1f}C")
-    print(f"  - Heatwave threshold: {cfg['heatwave_temp_threshold']}C (Max Temp)")
-    
+    log("info", f"  - Max Temperature range: {valid_max_temps.min():.1f}C to {valid_max_temps.max():.1f}C")
+    log("info", f"  - Mean Max Temperature: {valid_max_temps.mean():.1f}C")
+    log("info", f"  - Heatwave threshold: {cfg['heatwave_temp_threshold']}C (Max Temp)")
+
     # Count days above threshold
     hot_days_train = np.sum(train_max_temps >= cfg['heatwave_temp_threshold'])
     hot_days_val = np.sum(val_max_temps >= cfg['heatwave_temp_threshold'])
     hot_days_test = np.sum(test_max_temps >= cfg['heatwave_temp_threshold'])
-    print(f"  - Days >= {cfg['heatwave_temp_threshold']}C: Train={hot_days_train}, Val={hot_days_val}, Test={hot_days_test}")
+    log("info", f"  - Days >= {cfg['heatwave_temp_threshold']}C: Train={hot_days_train}, Val={hot_days_val}, Test={hot_days_test}")
     
     # Create labels based on MAX temperature threshold
     y_train = create_heatwave_labels_with_duration(
@@ -455,43 +482,44 @@ def train_xgboost_daily(
         min_duration=cfg["heatwave_min_duration"]
     )
     y_test = create_heatwave_labels_with_duration(
-        test_max_temps, 
+        test_max_temps,
         threshold_c=cfg["heatwave_temp_threshold"],
         min_duration=cfg["heatwave_min_duration"]
     )
-    
-    print(f"  - Train: {y_train.sum()}/{len(y_train)} positive ({y_train.mean()*100:.1f}%)")
-    print(f"  - Val: {y_val.sum()}/{len(y_val)} positive ({y_val.mean()*100:.1f}%)")
-    print(f"  - Test: {y_test.sum()}/{len(y_test)} positive ({y_test.mean()*100:.1f}%)")
-    
+
+    log("info", f"  - Train: {y_train.sum()}/{len(y_train)} positive ({y_train.mean()*100:.1f}%)")
+    log("info", f"  - Val: {y_val.sum()}/{len(y_val)} positive ({y_val.mean()*100:.1f}%)")
+    log("info", f"  - Test: {y_test.sum()}/{len(y_test)} positive ({y_test.mean()*100:.1f}%)")
+
     if y_train.sum() == 0 or y_val.sum() == 0 or y_test.sum() == 0:
-        print("Warning: No positive samples in one or more splits!")
-        print("  - Trying with lower threshold...")
+        log("warning", "Warning: No positive samples in one or more splits!")
+        log("warning", "  - Trying with lower threshold...")
         # Fallback to percentile-based threshold using valid MAX temps only
         valid_max_temps = train_max_temps[train_max_temps > -273]  # Exclude NaN/invalid
         if len(valid_max_temps) == 0:
-            print("  - ERROR: No valid temperature values!")
+            log("error", "  - ERROR: No valid temperature values!")
             return None
         # Use 90th percentile of MAX temperature as fallback
         threshold_c = np.percentile(valid_max_temps, 90)
         y_train = (train_max_temps >= threshold_c).astype(np.int32)
         y_val = (val_max_temps >= threshold_c).astype(np.int32)
         y_test = (test_max_temps >= threshold_c).astype(np.int32)
-        print(f"  - Using threshold: {threshold_c:.2f}C (90th percentile of MAX temps)")
-        print(f"  - Valid max temp range: {valid_max_temps.min():.1f}C to {valid_max_temps.max():.1f}C")
-        print(f"  - Train: {y_train.sum()}/{len(y_train)} positive ({y_train.mean()*100:.1f}%)")
-    
+        log("info", f"  - Using threshold: {threshold_c:.2f}C (90th percentile of MAX temps)")
+        log("info", f"  - Valid max temp range: {valid_max_temps.min():.1f}C to {valid_max_temps.max():.1f}C")
+        log("info", f"  - Train: {y_train.sum()}/{len(y_train)} positive ({y_train.mean()*100:.1f}%)")
+
     # [5/5] Train XGBoost
-    print("\n[5/5] Training XGBoost classifier...")
+    log("info", "\n[5/5] Training XGBoost classifier...")
+    progress("training", 0.8, {"stage": "model_training"})
     
     # Compute class weight
     n_neg = np.sum(y_train == 0)
     n_pos = np.sum(y_train == 1)
     scale_pos_weight = n_neg / max(n_pos, 1)
-    
-    print(f"  - Class balance: {n_neg} negative, {n_pos} positive")
-    print(f"  - scale_pos_weight: {scale_pos_weight:.2f}")
-    
+
+    log("info", f"  - Class balance: {n_neg} negative, {n_pos} positive")
+    log("info", f"  - scale_pos_weight: {scale_pos_weight:.2f}")
+
     start_time = time.time()
     
     model = xgb.XGBClassifier(
@@ -514,49 +542,49 @@ def train_xgboost_daily(
         eval_set=[(X_val, y_val)],
         verbose=False
     )
-    
+
     train_time = time.time() - start_time
-    print(f"  - Training time: {train_time:.2f}s")
-    
+    log("info", f"  - Training time: {train_time:.2f}s")
+
     # Evaluate
     train_pred = model.predict(X_train)
     val_pred = model.predict(X_val)
     test_pred = model.predict(X_test)
-    
+
     train_metrics = {
         "accuracy": accuracy_score(y_train, train_pred),
         "precision": precision_score(y_train, train_pred, zero_division=0),
         "recall": recall_score(y_train, train_pred, zero_division=0),
         "f1": f1_score(y_train, train_pred, zero_division=0),
     }
-    
+
     val_metrics = {
         "accuracy": accuracy_score(y_val, val_pred),
         "precision": precision_score(y_val, val_pred, zero_division=0),
         "recall": recall_score(y_val, val_pred, zero_division=0),
         "f1": f1_score(y_val, val_pred, zero_division=0),
     }
-    
+
     test_metrics = {
         "accuracy": accuracy_score(y_test, test_pred),
         "precision": precision_score(y_test, test_pred, zero_division=0),
         "recall": recall_score(y_test, test_pred, zero_division=0),
         "f1": f1_score(y_test, test_pred, zero_division=0),
     }
-    
-    print(f"\n  Train: Acc={train_metrics['accuracy']:.3f}, P={train_metrics['precision']:.3f}, R={train_metrics['recall']:.3f}, F1={train_metrics['f1']:.3f}")
-    print(f"  Val:   Acc={val_metrics['accuracy']:.3f}, P={val_metrics['precision']:.3f}, R={val_metrics['recall']:.3f}, F1={val_metrics['f1']:.3f}")
-    print(f"  Test:  Acc={test_metrics['accuracy']:.3f}, P={test_metrics['precision']:.3f}, R={test_metrics['recall']:.3f}, F1={test_metrics['f1']:.3f}")
-    
+
+    log("info", f"\n  Train: Acc={train_metrics['accuracy']:.3f}, P={train_metrics['precision']:.3f}, R={train_metrics['recall']:.3f}, F1={train_metrics['f1']:.3f}")
+    log("info", f"  Val:   Acc={val_metrics['accuracy']:.3f}, P={val_metrics['precision']:.3f}, R={val_metrics['recall']:.3f}, F1={val_metrics['f1']:.3f}")
+    log("info", f"  Test:  Acc={test_metrics['accuracy']:.3f}, P={test_metrics['precision']:.3f}, R={test_metrics['recall']:.3f}, F1={test_metrics['f1']:.3f}")
+
     # Feature importance
     feature_names = [
         "temp_mean", "temp_max", "temp_min", "temp_std", "temp_range", "hot_fraction",
         "z_mean", "z_std", "swvl1_mean", "tp_mean", "humidity_mean"
     ]
     importance = model.feature_importances_
-    print(f"\n  Feature importance:")
+    log("info", f"\n  Feature importance:")
     for name, imp in sorted(zip(feature_names[:len(importance)], importance), key=lambda x: -x[1]):
-        print(f"    - {name}: {imp:.4f}")
+        log("info", f"    - {name}: {imp:.4f}")
     
     # Save checkpoint
     version = _get_next_version(cfg["models_dir"])
@@ -601,13 +629,14 @@ def train_xgboost_daily(
     os.makedirs(cfg["models_dir"], exist_ok=True)
     import torch
     torch.save(checkpoint, save_path)
-    print(f"\nModel saved to: {save_path}")
-    
+    log("info", f"\nModel saved to: {save_path}")
+    progress("saving", 0.9, {"stage": "saving_model"})
+
     # Generate training report
     report_path = _generate_training_report(
         train_metrics, val_metrics, test_metrics,
         checkpoint["metadata"]["feature_importance"],
-        cfg, save_path, version
+        cfg, save_path, version, on_log
     )
     
     return {
@@ -642,9 +671,15 @@ def _get_next_version(model_dir: str, base_name: str = "heatwave_daily_xgboost")
     return max(versions) + 1 if versions else 1
 
 
-def _generate_training_report(train_metrics, val_metrics, test_metrics, 
-                              feature_importance, cfg, save_path, version=1):
+def _generate_training_report(train_metrics, val_metrics, test_metrics,
+                              feature_importance, cfg, save_path, version=1, on_log=None):
     """Generate a training report in output directory."""
+    def log(level: str, message: str):
+        if on_log:
+            on_log(level, message)
+        else:
+            print(f"[{level.upper()}] {message}")
+
     import matplotlib.pyplot as plt
     import matplotlib
     
@@ -756,13 +791,13 @@ def _generate_training_report(train_metrics, val_metrics, test_metrics,
              bbox=dict(boxstyle='round', facecolor=color, alpha=0.3))
     
     plt.tight_layout()
-    
+
     # Save report
     report_path = os.path.join("output", f"xgboost_daily_report_v{version}.png")
     plt.savefig(report_path, dpi=150, bbox_inches='tight', facecolor='white')
     plt.close()
-    
-    print(f"      Training report saved: {report_path}")
+
+    log("info", f"      Training report saved: {report_path}")
     return report_path
 
 

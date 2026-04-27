@@ -6,7 +6,7 @@ from src.core.config import settings
 def setup_logger(name: str = "heatwave"):
     logger = logging.getLogger(name)
     
-    if logger.hasHandlers():
+    if logger.handlers:
         return logger
 
     logger.setLevel(logging.DEBUG if settings.DEBUG else logging.INFO)
