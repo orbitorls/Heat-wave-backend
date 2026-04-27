@@ -1,0 +1,42 @@
+{
+  "k": 5,
+  "shuffle": true,
+  "random_state": 42,
+  "folds": [
+    {
+      "fold": 0,
+      "train_file": "tmp\\cv_splits\\train_indices_fold0.csv",
+      "val_file": "tmp\\cv_splits\\val_indices_fold0.csv",
+      "train_count": 4675,
+      "val_count": 1169
+    },
+    {
+      "fold": 1,
+      "train_file": "tmp\\cv_splits\\train_indices_fold1.csv",
+      "val_file": "tmp\\cv_splits\\val_indices_fold1.csv",
+      "train_count": 4675,
+      "val_count": 1169
+    },
+    {
+      "fold": 2,
+      "train_file": "tmp\\cv_splits\\train_indices_fold2.csv",
+      "val_file": "tmp\\cv_splits\\val_indices_fold2.csv",
+      "train_count": 4675,
+      "val_count": 1169
+    },
+    {
+      "fold": 3,
+      "train_file": "tmp\\cv_splits\\train_indices_fold3.csv",
+      "val_file": "tmp\\cv_splits\\val_indices_fold3.csv",
+      "train_count": 4675,
+      "val_count": 1169
+    },
+    {
+      "fold": 4,
+      "train_file": "tmp\\cv_splits\\train_indices_fold4.csv",
+      "val_file": "tmp\\cv_splits\\val_indices_fold4.csv",
+      "train_count": 4676,
+      "val_count": 1168
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "best_fold": "fold2",
+  "best_metric": 1.3396589075580858,
+  "model_path": "D:\\\\Heat-wave-backend\\models\\best_model_from_cv.pt",
+  "timestamp": "2026-04-08T23:15:02.1258941+07:00"
+}

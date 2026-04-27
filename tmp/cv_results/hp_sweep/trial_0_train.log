@@ -1,0 +1,23 @@
+=== Trial 0 | lr=1.90e-04 wd=2.5e-06 bs=64 ===
+D:\Heat-wave-backend\tmp\hp_sweep_fast.py:171: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = torch.cuda.amp.GradScaler()
+D:\Heat-wave-backend\tmp\hp_sweep_fast.py:190: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast():
+D:\Heat-wave-backend\tmp\hp_sweep_fast.py:215: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast():
+Epoch 1/6 | Train Loss: 0.332482 | Val Loss: 0.170812 | Val RMSE(temp): 2.360659 | Val MAE(temp): 1.691449
+Saved best model to tmp\cv_results\hp_sweep\trial_0_model.pt
+Epoch 2/6 | Train Loss: 0.120398 | Val Loss: 0.086321 | Val RMSE(temp): 1.955933 | Val MAE(temp): 1.410332
+Saved best model to tmp\cv_results\hp_sweep\trial_0_model.pt
+Epoch 3/6 | Train Loss: 0.070049 | Val Loss: 0.062447 | Val RMSE(temp): 1.704425 | Val MAE(temp): 1.222683
+Saved best model to tmp\cv_results\hp_sweep\trial_0_model.pt
+Epoch 4/6 | Train Loss: 0.054888 | Val Loss: 0.052704 | Val RMSE(temp): 1.614199 | Val MAE(temp): 1.139779
+Saved best model to tmp\cv_results\hp_sweep\trial_0_model.pt
+Epoch 5/6 | Train Loss: 0.048550 | Val Loss: 0.048344 | Val RMSE(temp): 1.569295 | Val MAE(temp): 1.111544
+Saved best model to tmp\cv_results\hp_sweep\trial_0_model.pt
+Epoch 6/6 | Train Loss: 0.044751 | Val Loss: 0.044995 | Val RMSE(temp): 1.527133 | Val MAE(temp): 1.079836
+Saved best model to tmp\cv_results\hp_sweep\trial_0_model.pt
+Trial 0 finished in 121.1s, epochs_trained=6
+D:\Heat-wave-backend\tmp\hp_sweep_fast.py:275: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  'timestamp': datetime.datetime.utcnow().isoformat() + 'Z',
+Wrote trial JSON to tmp\cv_results\hp_sweep\trial_0.json

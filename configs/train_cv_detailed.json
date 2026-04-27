@@ -1,0 +1,13 @@
+{
+  "epochs": 30,
+  "early_stopping_patience": 5,
+  "batch_size": 32,
+  "mixed_precision": true,
+  "optimizer": "Adam",
+  "lr": 3e-4,
+  "weight_decay": 1e-5,
+  "scheduler": { "type": "ReduceLROnPlateau", "factor": 0.5, "patience": 3 },
+  "seed": 42,
+  "device": "cuda",
+  "metrics": ["MAE","RMSE","R2","MAPE"]
+}

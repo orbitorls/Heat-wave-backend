@@ -1,0 +1,36 @@
+D:\Heat-wave-backend\scripts\cv_crossval_convlstm.py:117: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  print(f'Fold {fold} started at {datetime.datetime.utcnow().isoformat()} UTC')
+Fold 0 started at 2026-04-08T15:47:27.804638 UTC
+Loading indices from D:\Heat-wave-backend\tmp\cv_splits\train_indices_fold0.csv and D:\Heat-wave-backend\tmp\cv_splits\val_indices_fold0.csv
+Train samples: 4672, Val samples: 1164
+Training frames for normalization: 5841 frames (unique)
+X_train shape: (4672, 7, 8, 65, 37), Y_train shape: (4672, 2, 8, 65, 37)
+Error loading pretrained checkpoint: Weights only load failed. This file can still be loaded, to do so you have two options, [1mdo those steps only if you trust the source of the checkpoint[0m. 
+	(1) In PyTorch 2.6, we changed the default value of the `weights_only` argument in `torch.load` from `False` to `True`. Re-running `torch.load` with `weights_only` set to `False` will likely succeed, but it can result in arbitrary code execution. Do it only if you got the file from a trusted source.
+	(2) Alternatively, to load with `weights_only=True` please check the recommended steps in the following error message.
+	WeightsUnpickler error: Unsupported global: GLOBAL imblearn.ensemble._forest.BalancedRandomForestClassifier was not an allowed global by default. Please use `torch.serialization.add_safe_globals([BalancedRandomForestClassifier])` or the `torch.serialization.safe_globals([BalancedRandomForestClassifier])` context manager to allowlist this global if you trust this class/function.
+
+Check the documentation of torch.load to learn more about types accepted by default with weights_only https://pytorch.org/docs/stable/generated/torch.load.html. (continuing from scratch)
+No compatible pretrained checkpoint found; training from scratch.
+Epoch 1/10 | Train Loss: 0.093914 | Val Loss: 0.045873 | Val RMSE(temp): 1.566988 | Time: 30.8s
+Saved best model to tmp\cv_results\fold0\model.pt
+Epoch 2/10 | Train Loss: 0.040562 | Val Loss: 0.039564 | Val RMSE(temp): 1.485945 | Time: 28.8s
+Saved best model to tmp\cv_results\fold0\model.pt
+Epoch 3/10 | Train Loss: 0.036501 | Val Loss: 0.036710 | Val RMSE(temp): 1.445711 | Time: 28.6s
+Saved best model to tmp\cv_results\fold0\model.pt
+Epoch 4/10 | Train Loss: 0.034966 | Val Loss: 0.035404 | Val RMSE(temp): 1.403973 | Time: 28.4s
+Saved best model to tmp\cv_results\fold0\model.pt
+Epoch 5/10 | Train Loss: 0.034057 | Val Loss: 0.034803 | Val RMSE(temp): 1.398124 | Time: 28.3s
+Saved best model to tmp\cv_results\fold0\model.pt
+Epoch 6/10 | Train Loss: 0.033648 | Val Loss: 0.035809 | Val RMSE(temp): 1.413196 | Time: 28.3s
+Epoch 7/10 | Train Loss: 0.033305 | Val Loss: 0.033710 | Val RMSE(temp): 1.386138 | Time: 28.5s
+Saved best model to tmp\cv_results\fold0\model.pt
+Epoch 8/10 | Train Loss: 0.033055 | Val Loss: 0.035619 | Val RMSE(temp): 1.421212 | Time: 28.4s
+Epoch 9/10 | Train Loss: 0.032793 | Val Loss: 0.033722 | Val RMSE(temp): 1.382643 | Time: 28.3s
+Saved best model to tmp\cv_results\fold0\model.pt
+Epoch 10/10 | Train Loss: 0.032719 | Val Loss: 0.033339 | Val RMSE(temp): 1.377860 | Time: 28.2s
+Saved best model to tmp\cv_results\fold0\model.pt
+D:\Heat-wave-backend\scripts\cv_crossval_convlstm.py:331: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  'timestamp': datetime.datetime.utcnow().isoformat() + 'Z',
+Saved metrics to D:\Heat-wave-backend\tmp\cv_results\fold0\metrics.json
+Fold 0 finished in 290.5s

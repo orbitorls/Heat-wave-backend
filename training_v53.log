@@ -1,0 +1,73 @@
+C:\Users\User\AppData\Roaming\Python\Python312\site-packages\torch\cuda\__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+============================================================
+HEATWAVE PREDICTION MODEL TRAINING
+============================================================
+Sequence Length: 3 days
+Forecast Horizon: 2 days
+Random Forest: n_estimators=600, max_depth=40
+HP Tuning: Disabled
+Walk-Forward CV: Disabled
+Feature Engineering: Disabled
+============================================================
+Starting Heatwave AI Training...
+Random seed set to 42 for reproducibility
+Config: seq=3, future=2, rf_trees=600, depth=40, backend=balanced_rf, gpu=False, force_gpu=False, labeling=temperature, sampling=all, clip=(0.5,99.5)
+
+[1/6] Loading ERA5 Data using new DataLoader...
+      Loading combined ERA5 + NASA POWER data...
+2026-04-10 18:47:57,228 - heatwave - INFO - Loading 67 files from D:\Heat-wave-backend\era5_data...
+2026-04-10 18:48:52,687 - heatwave - WARNING - Skipped 35 file(s) due to incompatible schema or empty crop.
+2026-04-10 18:48:53,794 - heatwave - INFO - Loading 35 NASA POWER files...
+2026-04-10 18:49:25,091 - heatwave - INFO - Merging ERA5 and NASA POWER datasets...
+2026-04-10 18:49:25,091 - heatwave - INFO - Renamed NASA POWER variables: {'T2M': 't2m_power', 'RH2M': 'humidity', 'PRECTOTCORR': 'tp', 'T2MDEW': 'd2m'}
+2026-04-10 18:49:27,826 - heatwave - INFO - Combined dataset variables: ['t2m', 'swvl1', 'z', 'tp', 'humidity', 'd2m', 't2m_power', 'WS10M', 'PS']
+2026-04-10 18:49:27,841 - heatwave - INFO - Preparing training data (dynamic + static channels)...
+Traceback (most recent call last):
+  File "D:\Heat-wave-backend\Train_Ai.py", line 2277, in <module>
+      Available dynamic variables: ['z', 't2m', 'swvl1', 'tp', 'humidity']
+      Missing dynamic variables: []
+      Data quality: missing_dynamic=0 near_zero_std_channels=0
+      Normalized Data Shape: (18627, 8, 65, 44)
+
+[2/6] Temporal split (train/val/test)...
+      Filling NaN values within each split (causal)...
+      Split config: train=75%, val=10%, test=15% | Total timesteps: 18627
+      Sample counts: 13970/1862/2795
+      Applying clipping: [0.5%, 99.5%] percentiles
+      Normalization computed from 13970 training timesteps.
+      Samples train/val/test: 13966/1858/2791
+DEBUG train_climatology_temp: shape=(65, 44), ndim=2
+DEBUG after fix: train_climatology_temp shape=(65, 44)
+Unable to derive both classes from event thresholds. Falling back to sample-mean based labels (top 10% hottest samples).
+      Heatwave threshold (selected): 126.56 C
+      Threshold selection mode: temperature_sample_mean_fallback
+      Positive rate train/val/test: 0.100/0.191/0.301
+
+[4/6] Initializing BalancedRandomForestClassifier (CPU)...
+      Using XGBoost classifier (GPU if available)...
+
+[5/6] Training + validation metrics...
+    exit(main())
+         ^^^^^^
+  File "D:\Heat-wave-backend\Train_Ai.py", line 2256, in main
+    result = train(config=config)
+             ^^^^^^^^^^^^^^^^^^^^
+  File "D:\Heat-wave-backend\Train_Ai.py", line 1841, in train
+    rf_model.fit(x_train_flat, y_train_event)
+  File "C:\Users\User\AppData\Roaming\Python\Python312\site-packages\xgboost\core.py", line 751, in inner_f
+    return func(**kwargs)
+           ^^^^^^^^^^^^^^
+  File "C:\Users\User\AppData\Roaming\Python\Python312\site-packages\xgboost\sklearn.py", line 1806, in fit
+    self._Booster = train(
+                    ^^^^^^
+  File "C:\Users\User\AppData\Roaming\Python\Python312\site-packages\xgboost\core.py", line 751, in inner_f
+    return func(**kwargs)
+           ^^^^^^^^^^^^^^
+  File "C:\Users\User\AppData\Roaming\Python\Python312\site-packages\xgboost\training.py", line 200, in train
+    bst.update(dtrain, iteration=i, fobj=obj)
+  File "C:\Users\User\AppData\Roaming\Python\Python312\site-packages\xgboost\core.py", line 2390, in update
+    _check_call(
+  File "C:\Users\User\AppData\Roaming\Python\Python312\site-packages\xgboost\core.py", line 324, in _check_call
+    raise XGBoostError(py_str(_LIB.XGBGetLastError()))
+xgboost.core.XGBoostError: [18:54:24] C:\actions-runner\_work\xgboost\xgboost\src\common\io.h:362: bad_malloc: Failed to allocate 13012173408 bytes.

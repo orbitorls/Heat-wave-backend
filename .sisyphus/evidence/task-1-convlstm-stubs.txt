@@ -1,0 +1,6 @@
+ConvLSTMCell = None (was stub — NOW IMPLEMENTED by Task 3)
+HeatwaveConvLSTM = None (was stub — NOW IMPLEMENTED by Task 3)
+PhysicsInformedLoss = None (was stub — NOW IMPLEMENTED by Task 3)
+All stubs (None): False (all 3 are now real classes after Task 3)
+
+BASELINE CONFIRMED: all 3 were None stubs before Task 3 execution.

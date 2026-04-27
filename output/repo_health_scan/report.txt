@@ -1,0 +1,20 @@
+REPO HEALTH SCAN REPORT
+Repository path: D:\Heat-wave-backend
+
+1) requirements.txt encoding:
+   - requirements.txt detected encoding: UTF-16 LE (FF FE)
+
+2) Tracked files larger than 5 MB:
+   - None found
+
+3) Simple secrets scan (matching lines):
+   - Error during secrets scan: Cannot find path 'D:\Heat-wave-backend\era5_data\aa8af14e016b13c08fa6ec9ede565653.nc' because it does not exist.
+
+4) .gitignore checks:
+   - .gitignore: FOUND
+   - Missing common ignores: era5_data/, models/, *.pth, *.nc
+
+---SUMMARY-START---
+requirements.txt encoding: UTF-16 LE (FF FE)
+Missing .gitignore entries: era5_data/, models/, *.pth, *.nc
+---SUMMARY-END---

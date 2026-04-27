@@ -1,0 +1,9 @@
+{
+  "era5": {
+    "last_downloaded": "2026-04-18T08:17:03.196625+00:00",
+    "variables": [
+      "t2m"
+    ],
+    "file": "era5_data/test.nc"
+  }
+}

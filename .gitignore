@@ -7,3 +7,22 @@ venv/
 *.pt
 *.h5
 *.pkl
+
+# Python caches
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

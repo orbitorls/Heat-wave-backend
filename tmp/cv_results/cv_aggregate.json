@@ -1,0 +1,37 @@
+{
+  "mean_best_val_metric": 1.3558075841677752,
+  "std_best_val_metric": 0.013994279685797124,
+  "count": 5,
+  "per_fold": [
+    {
+      "fold": 0,
+      "best_val_metric": 1.3778602770392858,
+      "epochs_trained": 10,
+      "timestamp": "2026-04-08T15:52:18.304237Z"
+    },
+    {
+      "fold": 1,
+      "best_val_metric": 1.349887733948778,
+      "epochs_trained": 10,
+      "timestamp": "2026-04-08T15:57:06.502368Z"
+    },
+    {
+      "fold": 2,
+      "best_val_metric": 1.3396589075580858,
+      "epochs_trained": 10,
+      "timestamp": "2026-04-08T16:02:00.233855Z"
+    },
+    {
+      "fold": 3,
+      "best_val_metric": 1.3565945019792547,
+      "epochs_trained": 10,
+      "timestamp": "2026-04-08T16:07:04.407517Z"
+    },
+    {
+      "fold": 4,
+      "best_val_metric": 1.355036500313472,
+      "epochs_trained": 10,
+      "timestamp": "2026-04-08T16:11:58.153225Z"
+    }
+  ]
+}

@@ -1,0 +1,1211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Heatwave ML | Intelligence Studio</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:           #060b14;
+      --bg-2:         #0c1424;
+      --surface:      rgba(255,255,255,0.04);
+      --surface-2:    rgba(255,255,255,0.07);
+      --border:       rgba(255,255,255,0.08);
+      --border-accent: rgba(0,212,170,0.35);
+      --accent:       #00d4aa;
+      --accent-dim:   rgba(0,212,170,0.12);
+      --accent-glow:  0 0 24px rgba(0,212,170,0.18);
+      --warning:      #f59e0b;
+      --warning-dim:  rgba(245,158,11,0.12);
+      --danger:       #ef4444;
+      --danger-dim:   rgba(239,68,68,0.12);
+      --info:         #38bdf8;
+      --info-dim:     rgba(56,189,248,0.12);
+      --text:         #e2e8f0;
+      --text-muted:   #64748b;
+      --text-dim:     #334155;
+      --font:         'Outfit', sans-serif;
+      --mono:         'JetBrains Mono', monospace;
+      --radius:       14px;
+      --radius-sm:    8px;
+      --sidebar-w:    252px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ─── SIDEBAR ─────────────────────────────────────────────── */
+    .sidebar {
+      width: var(--sidebar-w);
+      background: var(--bg-2);
+      border-right: 1px solid var(--border);
+      padding: 1.5rem 1rem;
+      display: flex;
+      flex-direction: column;
+      position: fixed;
+      height: 100vh;
+      z-index: 100;
+      overflow-y: auto;
+    }
+
+    .sidebar-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0.5rem 0.75rem 1.75rem;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 1.25rem;
+    }
+
+    .sidebar-brand .brand-icon {
+      width: 36px; height: 36px;
+      background: var(--accent-dim);
+      border: 1px solid var(--border-accent);
+      border-radius: 9px;
+      display: grid; place-items: center;
+      font-size: 17px; color: var(--accent);
+    }
+
+    .sidebar-brand h1 {
+      font-size: 1rem; font-weight: 800;
+      letter-spacing: -0.3px; color: var(--text);
+      line-height: 1.1;
+    }
+    .sidebar-brand span {
+      font-size: 0.65rem; color: var(--text-muted);
+      font-weight: 500; display: block;
+    }
+
+    .nav-section-label {
+      font-size: 0.62rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px;
+      color: var(--text-dim);
+      padding: 0.75rem 0.75rem 0.4rem;
+    }
+
+    .nav-list { list-style: none; display: grid; gap: 2px; margin-bottom: 1rem; }
+
+    .nav-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 12px; border-radius: var(--radius-sm);
+      cursor: pointer; font-weight: 600; font-size: 0.875rem;
+      color: var(--text-muted); transition: all 0.15s;
+    }
+    .nav-item i { width: 18px; text-align: center; font-size: 0.85rem; }
+    .nav-item:hover { background: var(--surface-2); color: var(--text); }
+    .nav-item.active { background: var(--accent-dim); color: var(--accent); border: 1px solid var(--border-accent); }
+
+    .sidebar-footer {
+      margin-top: auto;
+      padding-top: 1.25rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .gpu-status-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px; border-radius: var(--radius-sm);
+      background: var(--surface);
+      font-size: 0.75rem; font-weight: 600;
+      color: var(--text-muted);
+    }
+    .gpu-status-row .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--text-dim); flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .gpu-status-row.gpu-active .dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+    .gpu-status-row.gpu-cpu .dot { background: var(--warning); }
+
+    .version-badge {
+      display: flex; align-items: center; justify-content: center;
+      gap: 6px; padding: 6px 10px; margin-top: 8px;
+      border-radius: var(--radius-sm);
+      background: var(--surface); border: 1px solid var(--border);
+      font-size: 0.7rem; font-weight: 700; color: var(--text-dim);
+      font-family: var(--mono);
+    }
+
+    /* ─── MAIN CONTENT ─────────────────────────────────────────── */
+    .main-content {
+      margin-left: var(--sidebar-w);
+      flex: 1;
+      padding: 2rem 2.5rem;
+      max-width: 1500px;
+      min-height: 100vh;
+    }
+
+    /* ─── HEADER ─────────────────────────────────────────────── */
+    header {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      margin-bottom: 2rem;
+    }
+
+    .header-info h2 {
+      font-size: 1.6rem; font-weight: 800;
+      letter-spacing: -0.5px; color: var(--text);
+    }
+    .header-info p { color: var(--text-muted); font-size: 0.875rem; margin-top: 3px; }
+
+    .header-pills { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+    .pill {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 14px; border-radius: 99px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      font-size: 0.78rem; font-weight: 700;
+      color: var(--text-muted); white-space: nowrap;
+    }
+    .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+
+    /* ─── KPI GRID ───────────────────────────────────────────── */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1rem;
+      margin-bottom: 1.75rem;
+    }
+
+    .kpi-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem 1.5rem;
+      position: relative;
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }
+    .kpi-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: var(--accent); opacity: 0.5;
+    }
+    .kpi-card:hover { border-color: var(--border-accent); }
+
+    .kpi-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 0.875rem;
+    }
+    .kpi-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+    .kpi-icon { font-size: 0.85rem; color: var(--text-dim); }
+
+    .kpi-value {
+      font-size: 2rem; font-weight: 800;
+      font-family: var(--mono);
+      letter-spacing: -1px; color: var(--text);
+      line-height: 1;
+      margin-bottom: 6px;
+    }
+
+    .kpi-sub { font-size: 0.75rem; color: var(--text-muted); font-weight: 500; display: flex; align-items: center; gap: 5px; }
+    .kpi-sub .up { color: var(--accent); }
+    .kpi-sub .neutral { color: var(--text-dim); }
+
+    /* Skeleton shimmer */
+    .skeleton {
+      background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 50%, var(--surface) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.4s infinite;
+      border-radius: 4px;
+      color: transparent !important;
+    }
+    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+    /* ─── TABS ─────────────────────────────────────────────────── */
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* ─── DASHBOARD LAYOUT ────────────────────────────────────── */
+    .dashboard-layout {
+      display: grid;
+      grid-template-columns: 390px 1fr;
+      gap: 1.5rem;
+      align-items: start;
+    }
+
+    /* ─── PANELS ──────────────────────────────────────────────── */
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      display: flex; flex-direction: column;
+    }
+
+    .panel-header {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .panel-header h3 {
+      font-size: 0.9rem; font-weight: 700;
+      display: flex; align-items: center; gap: 9px;
+      color: var(--text);
+    }
+    .panel-header h3 i { color: var(--accent); font-size: 0.85rem; }
+
+    .panel-body { padding: 1.5rem; }
+
+    /* ─── FORMS ────────────────────────────────────────────────── */
+    .control-form { display: grid; gap: 0.875rem; }
+
+    .input-wrapper { display: grid; gap: 5px; }
+    .input-wrapper label {
+      font-size: 0.72rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      color: var(--text-muted);
+    }
+
+    input[type="number"], input[type="text"], select {
+      width: 100%;
+      padding: 9px 12px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-family: var(--mono);
+      font-size: 0.875rem;
+      color: var(--text);
+      transition: border-color 0.15s, box-shadow 0.15s;
+      appearance: none;
+    }
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+    select { cursor: pointer; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 28px; }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+    .checkbox-group {
+      display: flex; gap: 1rem;
+      background: var(--bg-2); padding: 10px 12px;
+      border-radius: var(--radius-sm); border: 1px solid var(--border);
+    }
+    .checkbox-label {
+      display: flex; align-items: center; gap: 7px;
+      font-size: 0.8rem; font-weight: 600; cursor: pointer; color: var(--text-muted);
+    }
+    input[type="checkbox"] {
+      width: 15px; height: 15px; accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    .button-group { display: grid; gap: 8px; margin-top: 0.5rem; }
+
+    .btn {
+      padding: 10px 16px; border-radius: var(--radius-sm);
+      font-family: var(--font); font-weight: 700; font-size: 0.875rem;
+      cursor: pointer; transition: all 0.15s;
+      border: none; display: flex; align-items: center; justify-content: center; gap: 8px;
+    }
+    .btn-primary { background: var(--accent); color: #060b14; }
+    .btn-primary:hover { opacity: 0.88; transform: translateY(-1px); box-shadow: var(--accent-glow); }
+    .btn-primary:disabled { background: var(--text-dim); color: var(--text-muted); cursor: not-allowed; transform: none; box-shadow: none; opacity: 1; }
+    .btn-secondary { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); }
+    .btn-secondary:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-accent); }
+
+    /* ─── NOTICE BOX ──────────────────────────────────────────── */
+    #noticeBox {
+      display: none;
+      padding: 9px 14px;
+      border-radius: var(--radius-sm);
+      font-size: 0.82rem; font-weight: 600;
+      margin-bottom: 12px;
+    }
+
+    /* ─── STATUS & PROGRESS ───────────────────────────────────── */
+    .status-section { margin-top: 1.25rem; }
+
+    .status-row {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 7px;
+    }
+    .status-row-label { font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 10px; border-radius: 99px;
+      font-size: 0.7rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .status-pill.idle { background: rgba(100,116,139,0.15); color: var(--text-muted); border: 1px solid rgba(100,116,139,0.2); }
+    .status-pill.running { background: var(--warning-dim); color: var(--warning); border: 1px solid rgba(245,158,11,0.25); }
+    .status-pill.running::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--warning); animation: blink 1.2s ease-in-out infinite; }
+    .status-pill.completed { background: var(--accent-dim); color: var(--accent); border: 1px solid var(--border-accent); }
+    .status-pill.error { background: var(--danger-dim); color: var(--danger); border: 1px solid rgba(239,68,68,0.25); }
+
+    @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+    .status-message-box {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 12px;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      min-height: 34px;
+      margin-bottom: 1rem;
+    }
+
+    .progress-bar {
+      height: 6px; background: var(--bg-2);
+      border-radius: 99px; overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .progress-fill {
+      height: 100%; background: var(--accent);
+      width: 0%; transition: width 0.5s ease;
+      border-radius: 99px;
+      position: relative;
+    }
+    .progress-fill.active::after {
+      content: '';
+      position: absolute; top: 0; left: 0; bottom: 0;
+      width: 60px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
+      animation: progress-shimmer 1.5s ease-in-out infinite;
+    }
+    @keyframes progress-shimmer { 0% { transform: translateX(-60px); } 100% { transform: translateX(500px); } }
+
+    .epoch-label { font-size: 0.72rem; font-family: var(--mono); color: var(--text-muted); }
+
+    /* ─── MISSION LOG ──────────────────────────────────────────── */
+    .mission-log-wrap {
+      margin-top: 1.25rem;
+    }
+    .mission-log-label {
+      font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.8px; color: var(--text-dim);
+      margin-bottom: 6px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .mission-log-label i { color: var(--accent); }
+    #missionLog {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      max-height: 180px;
+      overflow-y: auto;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      display: flex; flex-direction: column; gap: 3px;
+    }
+    #missionLog::-webkit-scrollbar { width: 4px; }
+    #missionLog::-webkit-scrollbar-track { background: transparent; }
+    #missionLog::-webkit-scrollbar-thumb { background: var(--text-dim); border-radius: 4px; }
+    .log-entry { display: flex; gap: 8px; line-height: 1.45; }
+    .log-ts { color: var(--text-dim); flex-shrink: 0; }
+    .log-msg { color: var(--text-muted); }
+    .log-entry.log-running .log-msg { color: var(--warning); }
+    .log-entry.log-completed .log-msg { color: var(--accent); }
+    .log-entry.log-error .log-msg { color: var(--danger); }
+
+    /* ─── METRICS PANEL ────────────────────────────────────────── */
+    .result-hero {
+      background: linear-gradient(135deg, #0c1a2e 0%, #0a1628 60%, rgba(0,212,170,0.07) 100%);
+      border: 1px solid var(--border-accent);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      position: relative; overflow: hidden;
+    }
+    .result-hero::after {
+      content: '\f2c9';
+      font-family: 'Font Awesome 6 Free'; font-weight: 900;
+      position: absolute; right: -24px; bottom: -24px;
+      font-size: 130px; opacity: 0.04;
+      color: var(--accent);
+    }
+
+    .result-hero-inner { position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+    .result-hero-text p { font-size: 0.72rem; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.7px; margin-bottom: 6px; }
+    .result-hero-text h2 { font-size: 1.75rem; font-weight: 800; letter-spacing: -0.5px; color: var(--text); margin-bottom: 6px; }
+    .result-hero-text small { font-size: 0.8rem; color: var(--text-muted); }
+    .result-hero-badge {
+      background: var(--accent); color: var(--bg);
+      padding: 8px 16px; border-radius: 10px;
+      font-weight: 900; font-size: 1.2rem;
+      font-family: var(--mono); white-space: nowrap; flex-shrink: 0;
+    }
+
+    .metric-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.875rem; }
+    .metric-item {
+      padding: 1rem 1.25rem;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+    }
+    .metric-item.highlight { border-color: var(--border-accent); background: var(--accent-dim); }
+    .metric-item .label { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 5px; }
+    .metric-item .value { font-size: 1.4rem; font-weight: 800; font-family: var(--mono); color: var(--text); }
+    .metric-item.highlight .value { color: var(--accent); }
+
+    .insight-box {
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 1rem 1.25rem;
+      font-size: 0.85rem; line-height: 1.7; color: var(--text-muted);
+      margin-top: 1.25rem;
+    }
+
+    .baselines-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1.25rem; }
+    .baseline-block { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem; }
+    .baseline-block-title { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-bottom: 0.75rem; }
+    .baseline-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 0.82rem; }
+    .baseline-row:last-child { border: none; }
+    .baseline-row span:last-child { font-weight: 700; font-family: var(--mono); color: var(--text); }
+
+    /* ─── CHECKPOINT BADGE ────────────────────────────────────── */
+    .checkpoint-badge {
+      font-family: var(--mono); font-size: 0.7rem;
+      padding: 3px 10px; border-radius: 99px;
+      background: var(--accent-dim); color: var(--accent);
+      border: 1px solid var(--border-accent);
+      font-weight: 600; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    /* ─── FORECAST TAB ────────────────────────────────────────── */
+    .forecast-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 1rem; margin-top: 1rem; }
+    .forecast-card {
+      padding: 1.25rem 1rem;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      text-align: center;
+      transition: border-color 0.15s, transform 0.15s;
+    }
+    .forecast-card:hover { border-color: var(--border-accent); transform: translateY(-2px); }
+    .forecast-card .fc-day { font-weight: 800; font-size: 0.9rem; color: var(--text); margin-bottom: 2px; }
+    .forecast-card .fc-date { font-size: 0.68rem; color: var(--text-muted); margin-bottom: 10px; }
+    .forecast-card .fc-icon { font-size: 1.5rem; margin-bottom: 6px; color: var(--warning); }
+    .forecast-card .fc-temp { font-size: 1.75rem; font-weight: 800; font-family: var(--mono); color: var(--danger); line-height: 1; margin-bottom: 8px; }
+    .forecast-card .fc-risk {
+      font-size: 0.65rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;
+      padding: 3px 8px; border-radius: 99px; display: inline-block;
+    }
+    .fc-risk.critical { background: var(--danger-dim); color: var(--danger); border: 1px solid rgba(239,68,68,0.25); }
+    .fc-risk.high { background: var(--warning-dim); color: var(--warning); border: 1px solid rgba(245,158,11,0.25); }
+    .fc-risk.moderate, .fc-risk.low { background: var(--accent-dim); color: var(--accent); border: 1px solid var(--border-accent); }
+
+    /* ─── HISTORY TAB ─────────────────────────────────────────── */
+    .history-item {
+      display: grid; grid-template-columns: 1fr auto;
+      align-items: center; gap: 1rem;
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.12s;
+    }
+    .history-item:last-child { border: none; }
+    .history-item:hover { background: var(--surface-2); }
+    .history-item-name { font-weight: 700; font-size: 0.9rem; color: var(--text); margin-bottom: 3px; font-family: var(--mono); }
+    .history-item-meta { font-size: 0.75rem; color: var(--text-muted); }
+    .history-item-right { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+    .history-acc { font-family: var(--mono); font-weight: 700; color: var(--accent); font-size: 0.9rem; }
+    .history-empty { padding: 3rem; text-align: center; color: var(--text-dim); }
+
+    /* ─── SYSTEM TAB ──────────────────────────────────────────── */
+    .system-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    .hw-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+    .hw-row:last-child { border: none; }
+    .hw-row-label { color: var(--text-muted); font-weight: 600; }
+    .hw-row-val { font-family: var(--mono); font-size: 0.8rem; color: var(--text); font-weight: 600; }
+    pre#stateBox, pre#resultBox {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 1rem;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: #7dd3fc;
+      line-height: 1.6;
+      overflow: auto;
+      max-height: 380px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* ─── SCROLLBAR ────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--text-dim); border-radius: 5px; }
+  </style>
+</head>
+<body>
+  <!-- ═══ SIDEBAR ═══════════════════════════════════════════════ -->
+  <nav class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-icon"><i class="fa-solid fa-fire-flame-curved"></i></div>
+      <div>
+        <h1>Heatwave ML</h1>
+        <span>Intelligence Studio</span>
+      </div>
+    </div>
+
+    <p class="nav-section-label">Navigation</p>
+    <ul class="nav-list">
+      <li class="nav-item active" onclick="switchTab('training')">
+        <i class="fa-solid fa-microchip"></i> Training Studio
+      </li>
+      <li class="nav-item" onclick="switchTab('predictions')">
+        <i class="fa-solid fa-chart-simple"></i> Forecast &amp; Analysis
+      </li>
+      <li class="nav-item" onclick="switchTab('history')">
+        <i class="fa-solid fa-clock-rotate-left"></i> History
+      </li>
+      <li class="nav-item" onclick="switchTab('system')">
+        <i class="fa-solid fa-gears"></i> System Health
+      </li>
+    </ul>
+
+    <p class="nav-section-label">Pages</p>
+    <ul class="nav-list">
+      <li><a class="nav-item" href="/dashboard" style="text-decoration:none">
+        <i class="fa-solid fa-gauge-high"></i> Live Dashboard
+      </a></li>
+    </ul>
+
+    <div class="sidebar-footer">
+      <div class="gpu-status-row" id="gpuStatusRow">
+        <div class="dot"></div>
+        GPU: <span id="gpuVisible">—</span>
+      </div>
+      <div class="version-badge">
+        <i class="fa-solid fa-code-branch" style="color:var(--accent);font-size:0.65rem"></i>
+        V3.5 Engine
+      </div>
+    </div>
+  </nav>
+
+  <!-- ═══ MAIN CONTENT ════════════════════════════════════════════ -->
+  <div class="main-content">
+
+    <!-- Header -->
+    <header>
+      <div class="header-info">
+        <h2 id="headerTitle">Training Studio</h2>
+        <p>Manage model lifecycle and dataset training parameters.</p>
+      </div>
+      <div class="header-pills">
+        <div class="pill">
+          <div class="dot"></div>
+          GPU: <span id="gpuVisibleHeader">—</span>
+        </div>
+        <div class="pill">
+          <div class="dot" style="background:var(--info)"></div>
+          Backend: <span id="activeBackend">—</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- KPI Grid -->
+    <section class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-header">
+          <span class="kpi-label">Accuracy</span>
+          <i class="fa-solid fa-bullseye kpi-icon"></i>
+        </div>
+        <div class="kpi-value skeleton" id="ribbonTrainAccuracy">—</div>
+        <div class="kpi-sub"><i class="fa-solid fa-arrow-trend-up up"></i> Train Performance</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-header">
+          <span class="kpi-label">F1 Score</span>
+          <i class="fa-solid fa-gauge-high kpi-icon"></i>
+        </div>
+        <div class="kpi-value skeleton" id="ribbonTestF1">—</div>
+        <div class="kpi-sub"><i class="fa-solid fa-check up"></i> Reliability</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-header">
+          <span class="kpi-label">Trigger Temp</span>
+          <i class="fa-solid fa-temperature-high kpi-icon"></i>
+        </div>
+        <div class="kpi-value skeleton" id="ribbonThreshold">—</div>
+        <div class="kpi-sub"><span class="neutral">Heatwave Limit</span></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-header">
+          <span class="kpi-label">Data Files</span>
+          <i class="fa-solid fa-database kpi-icon"></i>
+        </div>
+        <div class="kpi-value skeleton" id="dataFileCount">—</div>
+        <div class="kpi-sub"><span class="neutral">NetCDF Samples</span></div>
+      </div>
+    </section>
+
+    <!-- ══ TRAINING TAB ════════════════════════════════════════════ -->
+    <div id="trainingTab" class="tab-content active">
+      <div class="dashboard-layout">
+
+        <!-- Controls Panel -->
+        <aside class="panel">
+          <div class="panel-header">
+            <h3><i class="fa-solid fa-sliders"></i> Training Parameters</h3>
+            <button class="btn btn-secondary" style="padding:5px 12px;font-size:0.75rem;" id="safePreset">
+              <i class="fa-solid fa-rotate-left"></i> Default
+            </button>
+          </div>
+          <div class="panel-body">
+            <div id="noticeBox"></div>
+
+            <form id="trainForm" class="control-form">
+              <div class="input-wrapper">
+                <label>Backend Architecture</label>
+                <select name="model_backend">
+                  <option value="balanced_rf">Balanced Random Forest</option>
+                </select>
+              </div>
+
+              <div class="grid-2">
+                <div class="input-wrapper"><label>Epochs</label><input type="number" name="epochs" value="20"></div>
+                <div class="input-wrapper"><label>Batch Size</label><input type="number" name="batch_size" value="4"></div>
+              </div>
+
+              <div class="grid-2">
+                <div class="input-wrapper"><label>Seq Length</label><input type="number" name="seq_len" value="7"></div>
+                <div class="input-wrapper"><label>Future Steps</label><input type="number" name="future_seq" value="2"></div>
+              </div>
+
+              <div class="input-wrapper">
+                <label>Trees (Estimators)</label>
+                <input type="number" name="rf_n_estimators" value="300">
+              </div>
+
+              <div class="input-wrapper">
+                <label>Labeling Method</label>
+                <select name="labeling_method" style="background:var(--surface-2);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-family:inherit;font-size:0.85rem;">
+                  <option value="temperature" selected>Temperature Threshold</option>
+                  <option value="heat_index">Heat Index (requires humidity)</option>
+                </select>
+              </div>
+
+              <div class="checkbox-group">
+                <label class="checkbox-label"><input type="checkbox" name="use_gpu"> <i class="fa-solid fa-microchip" style="color:var(--accent);font-size:0.8rem"></i> GPU</label>
+                <label class="checkbox-label"><input type="checkbox" name="rf_replacement" checked> <i class="fa-solid fa-shuffle" style="color:var(--text-muted);font-size:0.8rem"></i> Replacement</label>
+              </div>
+
+              <!-- Hidden advanced fields -->
+              <div style="display:none">
+                <input type="number" name="learning_rate">
+                <input type="number" name="rf_max_depth">
+                <input type="number" name="rf_min_samples_leaf">
+                <input type="number" name="rf_sampling_strategy">
+                <input type="number" name="train_ratio">
+                <input type="number" name="val_ratio">
+                <input type="number" name="heatwave_percentile">
+                <input type="number" name="clip_low_percentile">
+                <input type="number" name="clip_high_percentile">
+                <input type="number" name="event_min_duration_days">
+                <input type="number" name="event_min_hot_fraction">
+                <input type="checkbox" name="force_gpu">
+                <input type="hidden" name="require_dynamic_features" value="false">
+                <input type="hidden" name="allow_sample_mean_fallback" value="true">
+              </div>
+
+              <div class="button-group">
+                <button type="submit" class="btn btn-primary" id="submitBtn">
+                  <i class="fa-solid fa-rocket"></i> Deploy Training Worker
+                </button>
+                <button type="button" class="btn btn-secondary" id="refreshNow">
+                  <i class="fa-solid fa-arrows-rotate"></i> Sync State
+                </button>
+              </div>
+            </form>
+
+            <!-- Status & Progress -->
+            <div class="status-section">
+              <div class="status-row">
+                <span class="status-row-label">Worker Status</span>
+                <span class="status-pill idle" id="statusPill">Idle</span>
+              </div>
+              <div class="status-message-box" id="statusMessage">Awaiting command…</div>
+
+              <div class="status-row">
+                <span class="status-row-label">Pipeline Progress</span>
+                <span class="epoch-label" id="epochProgress">0 / 0</span>
+              </div>
+              <div class="progress-bar">
+                <div class="progress-fill" id="epochBar"></div>
+              </div>
+            </div>
+
+            <!-- Mission Log -->
+            <div class="mission-log-wrap">
+              <div class="mission-log-label">
+                <i class="fa-solid fa-terminal"></i> Mission Log
+              </div>
+              <div id="missionLog">
+                <div class="log-entry"><span class="log-ts">--:--:--</span><span class="log-msg">System initialized. Awaiting command.</span></div>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Metrics Panel -->
+        <main class="panel">
+          <div class="panel-header">
+            <h3><i class="fa-solid fa-chart-line"></i> Performance Analytics</h3>
+            <span class="checkpoint-badge" id="ribbonCheckpoint">Active: —</span>
+          </div>
+          <div class="panel-body">
+
+            <div class="result-hero">
+              <div class="result-hero-inner">
+                <div class="result-hero-text">
+                  <p>Latest Checkpoint Summary</p>
+                  <h2 id="resultHeadline">Analysis Pending</h2>
+                  <small id="resultSubtitle">The system is ready to evaluate the next model generation.</small>
+                </div>
+                <div class="result-hero-badge" id="resultHeatwaveBadge">— °C</div>
+              </div>
+            </div>
+
+            <div class="metric-grid">
+              <div class="metric-item">
+                <div class="label">Test Accuracy</div>
+                <div class="value" id="resultTrainAccuracy">—</div>
+              </div>
+              <div class="metric-item highlight">
+                <div class="label">F1 Detection Score</div>
+                <div class="value" id="resultF1">—</div>
+              </div>
+              <div class="metric-item">
+                <div class="label">Brier Score</div>
+                <div class="value" id="resultBrier">—</div>
+              </div>
+              <div class="metric-item">
+                <div class="label">False Alarm Rate</div>
+                <div class="value" id="resultFalseAlarm">—</div>
+              </div>
+            </div>
+
+            <div class="insight-box" id="resultReadable">
+              System awaits a valid training run to generate behavioral model insights.
+            </div>
+
+            <div class="baselines-grid">
+              <div class="baseline-block">
+                <div class="baseline-block-title">Baselines</div>
+                <div class="baseline-row"><span>Persistence RMSE</span><span id="baselinePersistenceRmse">—</span></div>
+                <div class="baseline-row"><span>Climatology RMSE</span><span id="baselineClimatologyRmse">—</span></div>
+              </div>
+              <div class="baseline-block">
+                <div class="baseline-block-title">Classifier</div>
+                <div class="baseline-row"><span>PR-AUC</span><span id="resultPrAuc">—</span></div>
+                <div class="baseline-row"><span>Positive Rate</span><span id="resultPosRate">—</span></div>
+              </div>
+            </div>
+
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <!-- ══ PREDICTIONS TAB ══════════════════════════════════════════ -->
+    <div id="predictionsTab" class="tab-content">
+      <div class="panel">
+        <div class="panel-header">
+          <h3><i class="fa-solid fa-calendar-days"></i> 7-Day Forecast Analysis</h3>
+        </div>
+        <div class="panel-body">
+          <p style="color:var(--text-muted);font-size:0.875rem;margin-bottom:0.5rem">
+            Derived from the current active checkpoint using autoregressive inference.
+          </p>
+          <div id="forecastContainer" class="forecast-grid">
+            <div style="text-align:center;padding:3rem;color:var(--text-dim);grid-column:1/-1;">
+              <i class="fa-solid fa-spinner fa-spin" style="font-size:1.75rem;margin-bottom:0.75rem;color:var(--accent)"></i>
+              <p>Aggregating forecast data…</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ HISTORY TAB ══════════════════════════════════════════════ -->
+    <div id="historyTab" class="tab-content">
+      <div class="panel">
+        <div class="panel-header">
+          <h3><i class="fa-solid fa-list"></i> Model Versioning History</h3>
+        </div>
+        <div id="historyList" style="padding:0;">
+          <div class="history-empty">No history found.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ SYSTEM TAB ═══════════════════════════════════════════════ -->
+    <div id="systemTab" class="tab-content">
+      <div class="system-grid">
+        <div class="panel">
+          <div class="panel-header">
+            <h3><i class="fa-solid fa-server"></i> Server State</h3>
+          </div>
+          <div class="panel-body">
+            <pre id="stateBox">{}</pre>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <h3><i class="fa-solid fa-microchip"></i> Hardware Detail</h3>
+          </div>
+          <div class="panel-body">
+            <div class="hw-row"><span class="hw-row-label">GPU Detection</span><span class="hw-row-val" id="gpuDetail">Checking…</span></div>
+            <div class="hw-row"><span class="hw-row-label">Started At</span><span class="hw-row-val" id="startedAt">—</span></div>
+            <div class="hw-row"><span class="hw-row-label">Finished At</span><span class="hw-row-val" id="finishedAt">—</span></div>
+
+            <p style="margin-top:1.5rem;font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim);margin-bottom:0.5rem">Raw Result Payload</p>
+            <pre id="resultBox" style="max-height:360px;">{}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /.main-content -->
+
+  <script>
+    // ── Bootstrap defaults from Flask template ──────────────────
+    const rawDefaults = {{ defaults|safe }};
+    const defaults = typeof rawDefaults === 'string' ? JSON.parse(rawDefaults) : rawDefaults;
+
+    let firstLoadDone = false;
+    const qs = (s) => document.querySelector(s);
+
+    // ── Helpers ─────────────────────────────────────────────────
+    function clearNotice() {
+      const box = qs('#noticeBox');
+      if (box) { box.style.display = 'none'; box.textContent = ''; }
+    }
+
+    function showNotice(message, isError = false) {
+      const box = qs('#noticeBox');
+      if (!box) return;
+      box.style.display = 'block';
+      box.style.background = isError ? 'rgba(239,68,68,0.12)' : 'rgba(0,212,170,0.12)';
+      box.style.color = isError ? '#ef4444' : '#00d4aa';
+      box.style.border = '1px solid ' + (isError ? 'rgba(239,68,68,0.25)' : 'rgba(0,212,170,0.25)');
+      box.textContent = message;
+    }
+
+    // ── Mission Log ─────────────────────────────────────────────
+    function appendLog(message, statusClass) {
+      const log = qs('#missionLog');
+      if (!log) return;
+      const now = new Date();
+      const ts = now.toTimeString().slice(0, 8);
+      const entry = document.createElement('div');
+      entry.className = 'log-entry' + (statusClass ? ' log-' + statusClass : '');
+      entry.innerHTML = '<span class="log-ts">' + ts + '</span><span class="log-msg">' + (message || '—') + '</span>';
+      log.insertBefore(entry, log.firstChild);
+      // Cap at 20 entries
+      while (log.children.length > 20) log.removeChild(log.lastChild);
+    }
+
+    // ── Tab switching ────────────────────────────────────────────
+    function switchTab(tab) {
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+      qs('#' + tab + 'Tab').classList.add('active');
+      qs('.nav-item[onclick*="' + tab + '"]').classList.add('active');
+      qs('#headerTitle').textContent = tab.charAt(0).toUpperCase() + tab.slice(1) + (tab === 'training' ? ' Studio' : ' Analysis');
+      if (tab === 'predictions') refreshForecast();
+    }
+
+    // ── Forecast ─────────────────────────────────────────────────
+    const RISK_ICONS = { CRITICAL: '🌡️', HIGH: '🔥', MEDIUM: '☀️', LOW: '🌿' };
+    const RISK_COLORS = { CRITICAL: '#ef4444', HIGH: '#f59e0b', MEDIUM: '#38bdf8', LOW: '#00d4aa' };
+
+    async function refreshForecast() {
+      const container = qs('#forecastContainer');
+      container.innerHTML = '<div style="text-align:center;padding:3rem;color:var(--text-dim);grid-column:1/-1"><i class="fa-solid fa-spinner fa-spin" style="font-size:1.75rem;margin-bottom:0.75rem;color:var(--accent)"></i><p>Loading forecast…</p></div>';
+      try {
+        const res = await fetch('/api/forecast');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        if (data.forecasts && data.forecasts.length) {
+          container.innerHTML = data.forecasts.map(f => {
+            const tMax = f.weather?.T2M_MAX ?? f.weather?.T2M;
+            const temp = tMax != null ? Number(tMax).toFixed(1) : '—';
+            const rl   = (f.risk_level || 'LOW').toUpperCase();
+            const rlLc = rl.toLowerCase();
+            const icon = RISK_ICONS[rl] || '🌡️';
+            const col  = RISK_COLORS[rl] || '#00d4aa';
+            const prob = f.probability != null ? (f.probability * 100).toFixed(0) + '%' : '';
+            return `<div class="forecast-card">
+              <div class="fc-day">${f.day_name || ('Day ' + f.day)}</div>
+              <div class="fc-date">${f.date || ''}</div>
+              <div class="fc-icon">${icon}</div>
+              <div class="fc-temp" style="color:${col}">${temp}°</div>
+              <div style="font-size:0.72rem;color:var(--text-muted);font-family:var(--mono);margin-bottom:6px">${prob}</div>
+              <span class="fc-risk ${rlLc}">${f.risk_level || '—'}</span>
+            </div>`;
+          }).join('');
+        } else {
+          container.innerHTML = '<div style="padding:2rem;text-align:center;color:var(--text-dim);grid-column:1/-1">No forecast data available — model may not be loaded.</div>';
+        }
+      } catch (e) {
+        container.innerHTML = '<div style="padding:2rem;color:var(--danger);font-family:var(--mono);font-size:0.8rem;grid-column:1/-1">Error: ' + e.message + '</div>';
+      }
+    }
+
+    // ── Apply defaults to form ───────────────────────────────────
+    function applyDefaults() {
+      const form = qs('#trainForm');
+      Object.entries(defaults).forEach(([key, value]) => {
+        const el = form.elements.namedItem(key);
+        if (!el) return;
+        if (el.type === 'checkbox') el.checked = !!value;
+        else el.value = value;
+      });
+    }
+
+    // ── Build payload ────────────────────────────────────────────
+    function formPayload() {
+      const form = qs('#trainForm');
+      const p = {};
+      Object.keys(defaults).forEach(k => {
+        const el = form.elements.namedItem(k);
+        if (el) {
+          if (el.type === 'checkbox') p[k] = el.checked;
+          else if (el.type === 'number') p[k] = Number(el.value);
+          else p[k] = el.value;
+        } else {
+          p[k] = defaults[k];
+        }
+      });
+      return p;
+    }
+
+    // ── Run state ────────────────────────────────────────────────
+    function setRunState(isRunning) {
+      const btn = qs('#submitBtn');
+      if (!btn) return;
+      btn.disabled = isRunning;
+      btn.innerHTML = isRunning
+        ? '<i class="fa-solid fa-spinner fa-spin"></i> Worker Deployed…'
+        : '<i class="fa-solid fa-rocket"></i> Deploy Training Worker';
+      const bar = qs('#epochBar');
+      if (bar) {
+        if (isRunning) bar.classList.add('active');
+        else bar.classList.remove('active');
+      }
+    }
+
+    // ── Refresh status ───────────────────────────────────────────
+    async function refreshStatus() {
+      try {
+        const res = await fetch('/api/training/status');
+        const data = await res.json();
+
+        const pill = qs('#statusPill');
+        if (pill) { pill.className = 'status-pill ' + data.status; pill.textContent = data.status; }
+
+        const msg = data.message || '—';
+        if (qs('#statusMessage')) qs('#statusMessage').textContent = msg;
+
+        const gpuActive = data.gpu?.gpu_detected;
+        const gpuText = gpuActive ? 'NVIDIA Active' : 'CPU Mode';
+        if (qs('#gpuVisible')) qs('#gpuVisible').textContent = gpuText;
+        if (qs('#gpuVisibleHeader')) qs('#gpuVisibleHeader').textContent = gpuText;
+        const gpuRow = qs('#gpuStatusRow');
+        if (gpuRow) {
+          gpuRow.classList.toggle('gpu-active', !!gpuActive);
+          gpuRow.classList.toggle('gpu-cpu', !gpuActive);
+        }
+
+        if (qs('#activeBackend')) qs('#activeBackend').textContent = data.config?.model_backend || '—';
+        if (qs('#startedAt')) qs('#startedAt').textContent = data.started_at ? new Date(data.started_at).toLocaleString() : '—';
+        if (qs('#finishedAt')) qs('#finishedAt').textContent = data.finished_at ? new Date(data.finished_at).toLocaleString() : '—';
+        if (qs('#gpuDetail')) qs('#gpuDetail').textContent = gpuActive ? 'NVIDIA Active' : 'CPU Mode';
+
+        setRunState(data.status === 'running' || data.status === 'starting');
+
+        const epoch = data.metrics?.epoch;
+        const total = data.metrics?.total_epochs;
+        const pct = (epoch && total) ? Math.min(100, (epoch / total) * 100) : 0;
+        if (qs('#epochProgress')) qs('#epochProgress').textContent = (epoch && total) ? `${epoch} / ${total}` : '0 / 0';
+        if (qs('#epochBar')) qs('#epochBar').style.width = pct + '%';
+
+        if (qs('#stateBox')) qs('#stateBox').textContent = JSON.stringify(data, null, 2);
+
+        updateResults(data);
+        appendLog(msg, data.status);
+
+        if (!firstLoadDone && data.config) {
+          const form = qs('#trainForm');
+          Object.entries(data.config).forEach(([k, v]) => {
+            const el = form.elements.namedItem(k);
+            if (el) {
+              if (el.type === 'checkbox') el.checked = !!v;
+              else el.value = v;
+            }
+          });
+        }
+        firstLoadDone = true;
+      } catch (error) { console.error('Status refresh error:', error); }
+    }
+
+    // ── Update results ───────────────────────────────────────────
+    function updateResults(data) {
+      const r = data.result || {};
+      const m = r.test_event_metrics || {};
+      const acc = data.metrics?.train_accuracy || computeAccuracy(r.train_event_metrics);
+
+      if (qs('#resultHeadline')) qs('#resultHeadline').textContent = r.save_path ? 'Pipeline Success' : 'Analysis Pending';
+      if (qs('#resultHeatwaveBadge')) qs('#resultHeatwaveBadge').textContent = r.heatwave_threshold_c ? r.heatwave_threshold_c.toFixed(1) + ' °C' : '— °C';
+
+      const accStr = acc ? (acc * 100).toFixed(2) + '%' : '—';
+      if (qs('#ribbonTrainAccuracy')) { qs('#ribbonTrainAccuracy').textContent = accStr; qs('#ribbonTrainAccuracy').classList.remove('skeleton'); }
+      if (qs('#resultTrainAccuracy')) qs('#resultTrainAccuracy').textContent = accStr;
+
+      const f1Str = m.f1 ? m.f1.toFixed(3) : '—';
+      if (qs('#ribbonTestF1')) { qs('#ribbonTestF1').textContent = f1Str; qs('#ribbonTestF1').classList.remove('skeleton'); }
+      if (qs('#resultF1')) qs('#resultF1').textContent = f1Str;
+
+      const thrStr = r.heatwave_threshold_c ? r.heatwave_threshold_c.toFixed(1) + '°' : '—';
+      if (qs('#ribbonThreshold')) { qs('#ribbonThreshold').textContent = thrStr; qs('#ribbonThreshold').classList.remove('skeleton'); }
+
+      if (qs('#resultBrier')) qs('#resultBrier').textContent = m.brier_score ? m.brier_score.toFixed(4) : '—';
+      if (qs('#resultFalseAlarm')) qs('#resultFalseAlarm').textContent = m.false_alarm_rate ? m.false_alarm_rate.toFixed(3) : '—';
+
+      const fileName = r.save_path ? r.save_path.split(/[\\/]/).pop() : '—';
+      if (qs('#ribbonCheckpoint')) qs('#ribbonCheckpoint').textContent = 'Active: ' + fileName;
+      if (qs('#resultSubtitle')) qs('#resultSubtitle').textContent = r.save_path ? ('Checkpoint: ' + fileName) : 'The system is ready to evaluate the next model generation.';
+
+      if (r.save_path && qs('#resultReadable')) {
+        const thr  = r.heatwave_threshold_c != null ? r.heatwave_threshold_c.toFixed(1) + '°C' : '—';
+        const f1v  = m.f1 != null ? m.f1.toFixed(3) : null;
+        const qual = f1v ? (parseFloat(f1v) > 0.6 ? 'robust' : 'baseline') : 'unknown';
+        qs('#resultReadable').innerHTML = `<strong>Insight:</strong> Heatwave threshold detected at <strong>${thr}</strong>. ` +
+          (f1v ? `F1 score <strong>${f1v}</strong> indicates <strong>${qual}</strong> predictive capability for event detection.` : 'F1 score unavailable — metrics may be incomplete.');
+      }
+      if (qs('#resultBox')) qs('#resultBox').textContent = JSON.stringify(r, null, 2);
+    }
+
+    // ── Accuracy helper ──────────────────────────────────────────
+    function computeAccuracy(m) {
+      if (!m) return null;
+      const total = (m.tp || 0) + (m.fp || 0) + (m.fn || 0) + (m.tn || 0);
+      return total > 0 ? ((m.tp || 0) + (m.tn || 0)) / total : null;
+    }
+
+    // ── History ──────────────────────────────────────────────────
+    async function refreshHistory() {
+      const box = qs('#historyList');
+      if (!box) return;
+      try {
+        const res = await fetch('/api/training/history');
+        const data = await res.json();
+        if (!data.items?.length) {
+          box.innerHTML = '<div class="history-empty">No training history yet.</div>';
+          return;
+        }
+        box.innerHTML = data.items.map((item, idx) => {
+          const acc = item.metrics?.test_accuracy ?? item.metrics?.train_accuracy;
+          const accStr = acc != null ? (acc * 100).toFixed(1) + '%' : '—';
+          const f1 = item.metrics?.test_f1;
+          const f1Str = f1 != null ? f1.toFixed(3) : '—';
+          const dt = item.finished_at || item.started_at;
+          const dtStr = dt ? new Date(dt).toLocaleString() : '—';
+          // Prefer checkpoint filename > model_type label > run index
+          const savePath = item.result?.save_path;
+          const checkName = savePath ? savePath.split(/[\\/]/).pop() : null;
+          const modelName = checkName || item.result?.model_type || ('Run #' + (idx + 1));
+          const epochs = item.config?.epochs ? 'epochs: ' + item.config.epochs : '';
+          const backend = item.config?.model_backend || '';
+          const meta = [backend, epochs, dtStr].filter(Boolean).join(' · ');
+          return `<div class="history-item">
+            <div>
+              <div class="history-item-name">${modelName}</div>
+              <div class="history-item-meta">${meta}</div>
+            </div>
+            <div class="history-item-right">
+              <span class="history-acc" title="Accuracy">${accStr}</span>
+              <span style="font-family:var(--mono);font-size:0.75rem;color:var(--text-muted)" title="F1">F1 ${f1Str}</span>
+              <span class="status-pill ${item.status}" style="font-size:0.6rem">${item.status}</span>
+            </div>
+          </div>`;
+        }).join('');
+      } catch (e) {
+        box.innerHTML = '<div class="history-empty" style="color:var(--danger)">Failed to load history.</div>';
+      }
+    }
+
+    // ── Form submission ──────────────────────────────────────────
+    qs('#trainForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      clearNotice();
+      const payload = formPayload();
+      setRunState(true);
+      try {
+        const res = await fetch('/api/training/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showNotice(data.error || 'Failed to start training.', true);
+          setRunState(false);
+        } else {
+          showNotice('Training Worker Dispatched Successfully');
+          appendLog('Training dispatched with backend: ' + (payload.model_backend || '—'), 'running');
+        }
+      } catch (e) {
+        showNotice('Network error: ' + e.message, true);
+        setRunState(false);
+      }
+      refreshStatus();
+    });
+
+    // ── Sync button ──────────────────────────────────────────────
+    qs('#refreshNow').addEventListener('click', () => {
+      refreshStatus();
+      refreshHistory();
+      if (qs('#predictionsTab').classList.contains('active')) refreshForecast();
+      showNotice('System status synced');
+      setTimeout(clearNotice, 2000);
+    });
+
+    // ── Default preset button ────────────────────────────────────
+    qs('#safePreset').addEventListener('click', () => {
+      applyDefaults();
+      showNotice('Defaults restored');
+      setTimeout(clearNotice, 1500);
+    });
+
+    // ── Init ─────────────────────────────────────────────────────
+    applyDefaults();
+    refreshStatus();
+    refreshHistory();
+    refreshForecast(); // pre-fetch so Forecast tab is ready immediately
+    fetch('/api/training/preflight').then(r => r.json()).then(d => {
+      if (qs('#dataFileCount')) {
+        qs('#dataFileCount').textContent = d.data_file_count ?? '—';
+        qs('#dataFileCount').classList.remove('skeleton');
+      }
+    }).catch(() => {
+      if (qs('#dataFileCount')) { qs('#dataFileCount').textContent = '—'; qs('#dataFileCount').classList.remove('skeleton'); }
+    });
+
+    setInterval(() => { refreshStatus(); refreshHistory(); }, 5000);
+  </script>
+</body>
+</html>

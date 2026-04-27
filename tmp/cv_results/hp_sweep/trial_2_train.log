@@ -1,0 +1,15 @@
+=== Trial 2 | lr=2.26e-04 wd=8.9e-05 bs=32 ===
+Epoch 1/6 | Train Loss: 0.209547 | Val Loss: 0.082369 | Val RMSE(temp): 1.878499 | Val MAE(temp): 1.350812
+Saved best model to tmp\cv_results\hp_sweep\trial_2_model.pt
+Epoch 2/6 | Train Loss: 0.060177 | Val Loss: 0.051580 | Val RMSE(temp): 1.598921 | Val MAE(temp): 1.122078
+Saved best model to tmp\cv_results\hp_sweep\trial_2_model.pt
+Epoch 3/6 | Train Loss: 0.046143 | Val Loss: 0.044824 | Val RMSE(temp): 1.523810 | Val MAE(temp): 1.070842
+Saved best model to tmp\cv_results\hp_sweep\trial_2_model.pt
+Epoch 4/6 | Train Loss: 0.041326 | Val Loss: 0.040689 | Val RMSE(temp): 1.473005 | Val MAE(temp): 1.034677
+Saved best model to tmp\cv_results\hp_sweep\trial_2_model.pt
+Epoch 5/6 | Train Loss: 0.038276 | Val Loss: 0.038661 | Val RMSE(temp): 1.446051 | Val MAE(temp): 1.016588
+Saved best model to tmp\cv_results\hp_sweep\trial_2_model.pt
+Epoch 6/6 | Train Loss: 0.036475 | Val Loss: 0.037310 | Val RMSE(temp): 1.433036 | Val MAE(temp): 1.016651
+Saved best model to tmp\cv_results\hp_sweep\trial_2_model.pt
+Trial 2 finished in 114.3s, epochs_trained=6
+Wrote trial JSON to tmp\cv_results\hp_sweep\trial_2.json

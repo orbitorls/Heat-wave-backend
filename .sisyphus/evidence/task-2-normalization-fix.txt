@@ -1,0 +1,17 @@
+Loading ERA5 data...
+2026-03-07 14:11:31,140 - heatwave - INFO - Loading 32 files from D:\Heat-wave-backend\era5_data...
+Preparing training data...
+2026-03-07 14:11:36,220 - heatwave - INFO - Preparing training data (dynamic + static channels)...
+2026-03-07 14:11:37,536 - heatwave - WARNING - Variable tp not found, filling with zeros.
+2026-03-07 14:11:37,546 - heatwave - WARNING - Variable humidity not found, filling with zeros.
+t2m channel mean: 300.05
+PASS: data is raw (un-normalized)
+data.shape: (5844, 8, 65, 37)
+stats type: <class 'dict'>
+
+Computing normalization stats for train_end_idx=4090...
+norm_stats keys: ['mean', 'std']
+mean.shape: (1, 8, 1, 1)
+std.shape: (1, 8, 1, 1)
+PASS: All std values > 0
+PASS: compute_train_normalization_stats works

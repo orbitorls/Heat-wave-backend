@@ -1,0 +1,10 @@
+load_era5_data output:
+  data.shape = (5844, 8, 65, 37)
+  lats.shape = (65,)
+  lons.shape = (37,)
+  mean.shape = (1, 8, 1, 1)
+  std.shape = (1, 8, 1, 1)
+
+create_sequences output:
+  X.shape = (5835, 7, 8, 65, 37)
+  Y.shape = (5835, 2, 8, 65, 37)

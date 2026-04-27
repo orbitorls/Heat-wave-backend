@@ -1,0 +1,30 @@
+Fold 2 started at 2026-04-08T15:57:06.526074 UTC
+Loading indices from D:\Heat-wave-backend\tmp\cv_splits\train_indices_fold2.csv and D:\Heat-wave-backend\tmp\cv_splits\val_indices_fold2.csv
+Train samples: 4667, Val samples: 1169
+Training frames for normalization: 5842 frames (unique)
+X_train shape: (4667, 7, 8, 65, 37), Y_train shape: (4667, 2, 8, 65, 37)
+Error loading pretrained checkpoint: Weights only load failed. This file can still be loaded, to do so you have two options, [1mdo those steps only if you trust the source of the checkpoint[0m. 
+	(1) In PyTorch 2.6, we changed the default value of the `weights_only` argument in `torch.load` from `False` to `True`. Re-running `torch.load` with `weights_only` set to `False` will likely succeed, but it can result in arbitrary code execution. Do it only if you got the file from a trusted source.
+	(2) Alternatively, to load with `weights_only=True` please check the recommended steps in the following error message.
+	WeightsUnpickler error: Unsupported global: GLOBAL imblearn.ensemble._forest.BalancedRandomForestClassifier was not an allowed global by default. Please use `torch.serialization.add_safe_globals([BalancedRandomForestClassifier])` or the `torch.serialization.safe_globals([BalancedRandomForestClassifier])` context manager to allowlist this global if you trust this class/function.
+
+Check the documentation of torch.load to learn more about types accepted by default with weights_only https://pytorch.org/docs/stable/generated/torch.load.html. (continuing from scratch)
+No compatible pretrained checkpoint found; training from scratch.
+Epoch 1/10 | Train Loss: 0.097500 | Val Loss: 0.044231 | Val RMSE(temp): 1.530739 | Time: 29.1s
+Saved best model to tmp\cv_results\fold2\model.pt
+Epoch 2/10 | Train Loss: 0.040457 | Val Loss: 0.036999 | Val RMSE(temp): 1.425250 | Time: 28.3s
+Saved best model to tmp\cv_results\fold2\model.pt
+Epoch 3/10 | Train Loss: 0.036639 | Val Loss: 0.036037 | Val RMSE(temp): 1.420054 | Time: 28.4s
+Saved best model to tmp\cv_results\fold2\model.pt
+Epoch 4/10 | Train Loss: 0.035178 | Val Loss: 0.033962 | Val RMSE(temp): 1.375326 | Time: 29.5s
+Saved best model to tmp\cv_results\fold2\model.pt
+Epoch 5/10 | Train Loss: 0.034490 | Val Loss: 0.034334 | Val RMSE(temp): 1.375549 | Time: 28.1s
+Epoch 6/10 | Train Loss: 0.033983 | Val Loss: 0.033322 | Val RMSE(temp): 1.385550 | Time: 28.6s
+Epoch 7/10 | Train Loss: 0.033640 | Val Loss: 0.032544 | Val RMSE(temp): 1.358853 | Time: 28.4s
+Saved best model to tmp\cv_results\fold2\model.pt
+Epoch 8/10 | Train Loss: 0.033365 | Val Loss: 0.032114 | Val RMSE(temp): 1.339659 | Time: 30.5s
+Saved best model to tmp\cv_results\fold2\model.pt
+Epoch 9/10 | Train Loss: 0.033169 | Val Loss: 0.031791 | Val RMSE(temp): 1.341028 | Time: 29.5s
+Epoch 10/10 | Train Loss: 0.033061 | Val Loss: 0.032973 | Val RMSE(temp): 1.383996 | Time: 29.3s
+Saved metrics to D:\Heat-wave-backend\tmp\cv_results\fold2\metrics.json
+Fold 2 finished in 293.7s

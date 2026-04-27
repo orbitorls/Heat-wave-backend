@@ -1,0 +1,27 @@
+{
+  "advice": "Max temp reaching 31.3 C. LOW precautions advised.",
+  "anomaly": {
+    "is_anomaly": false,
+    "n_triggers": 0,
+    "severity": "low",
+    "triggers": []
+  },
+  "bbox": {
+    "east": 106.0,
+    "north": 21.0,
+    "south": 5.0,
+    "west": 97.0
+  },
+  "date": "2026-03-07",
+  "model_type": "balanced_random_forest",
+  "probability": 0.041111111111111105,
+  "risk_level": "LOW",
+  "status": "ok",
+  "weather": {
+    "RH2M": null,
+    "T2M": 26.196209666040012,
+    "T2M_MAX": 31.300927734375023,
+    "T2M_MIN": 14.624688720703148,
+    "WS10M": null
+  }
+}
