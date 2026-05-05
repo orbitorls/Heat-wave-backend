@@ -1,0 +1,61 @@
+# HeatShield AI — risk thresholds / threshold สำหรับการแจ้งเตือน
+# Initial defaults from the project plan. Values WILL be retuned in Phase 7
+# against held-out coverage / false-alert rates per station.
+# ค่าเริ่มต้นจาก plan ของโปรเจกต์ — ค่าทุกตัวจะถูก re-tune ใน Phase 7 ด้วย
+# ข้อมูล hold-out ของแต่ละสถานี (coverage / false-alert rate).
+
+version: v0
+
+# --- heat index bands (Rothfusz, °C) ---------------------------------------
+# ใช้คู่กับ adaptive percentile ใน app/core/adaptive_definition.py
+bands:
+  caution_c:        32.0     # 32–41 — Caution
+  extreme_caution_c: 41.0    # 41–54 — Extreme Caution
+  danger_c:          54.0    # 54+    — Danger / Extreme Danger
+
+# --- alert tiers driven by forecast quantiles + classifier ----------------
+# q90 here = the upper tail of the forecast PI (we use q05/q50/q95; q90 is the
+# alias used in the plan and is computed as max(q95, q50 + 1.28 * sigma_hat)).
+alerts:
+  danger_watch:
+    description_en: "Forecast q90 reaches Danger band within horizon."
+    description_th: "พยากรณ์ q90 ภายใน horizon แตะระดับ Danger"
+    rule:
+      q90_hi_c_gte: 42.0      # initial — keep aligned with bands.extreme_caution_c
+      lead_time_h_min: 6
+      consecutive_hours_min: 2
+
+  danger_alert:
+    description_en: "Classifier probability of Danger crossing the gate."
+    description_th: "ความน่าจะเป็นจาก classifier ว่าจะถึงระดับ Danger เกิน gate"
+    rule:
+      p_danger_gate: 0.20     # decision threshold, see configs/train/classifier.yaml
+      lead_time_h_min: 3
+
+  extreme_alert:
+    description_en: "Median forecast already in Danger band; act now."
+    description_th: "พยากรณ์ค่ากลางอยู่ในช่วง Danger แล้ว — ต้องดำเนินการทันที"
+    rule:
+      q50_hi_c_gte: 54.0
+      consecutive_hours_min: 1
+
+# --- low-confidence guards (mirrors app/ml/forecast/predict.py) ------------
+low_confidence:
+  obs_age_minutes_max: 60     # last observation older than this -> low confidence
+  pi_width_c_max: 4.0         # absolute PI width cap (°C)
+  pi_width_ratio_max: 1.6     # × median v3 PI width over recent window
+
+# --- per-station overrides (left empty; populate in Phase 7) ---------------
+station_overrides: {}
+# Example (do not enable until tuned):
+# station_overrides:
+#   BKK_01:
+#     alerts:
+#       danger_watch:
+#         rule:
+#           q90_hi_c_gte: 43.0    # Bangkok runs hotter; raise the gate
+#   HYI_01:
+#     alerts:
+#       danger_alert:
+#         rule:
+#           p_danger_gate: 0.25   # coastal, fewer extremes -> require higher confidence

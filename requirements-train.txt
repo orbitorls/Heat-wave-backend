@@ -1,0 +1,47 @@
+# HeatShield AI — training-only dependencies (Colab Python 3.11)
+# ใช้สำหรับ Colab notebook ที่ทำ ingest + train เท่านั้น (ไม่รวม FastAPI/uvicorn)
+# Used in Colab notebooks for ingest + training only (FastAPI/uvicorn excluded)
+#
+# Install: pip install -r requirements-train.txt
+
+# --- core data / numerics ---------------------------------------------------
+numpy>=1.26.0,<3.0.0
+pandas>=2.2.0,<3.0.0
+pyarrow>=16.0.0
+scikit-learn>=1.5.0,<2.0.0
+python-dateutil>=2.9.0
+pyyaml>=6.0.1
+
+# --- pydantic (still needed because app.data.schemas uses v2) --------------
+pydantic>=2.7.0,<3.0.0
+pydantic-settings>=2.4.0
+
+# --- HTTP clients (used by NASA POWER / TMD ingestors) ---------------------
+httpx>=0.27.0
+tenacity>=8.2.0
+
+# --- ML backends -----------------------------------------------------------
+xgboost>=2.1.0
+lightgbm>=4.5.0
+catboost>=1.2.7
+optuna>=3.6.0
+shap>=0.46.0
+
+# --- ERA5 / NetCDF stack (CDS API needs ~/.cdsapirc) -----------------------
+cdsapi>=0.7.0
+xarray>=2024.1.0
+netCDF4>=1.7.0
+
+# --- visualization ---------------------------------------------------------
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# --- testing (so pytest still runs inside Colab if needed) -----------------
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+
+# --- notes ------------------------------------------------------------------
+# TabPFN backend (app/ml/forecast/backends/) loads `tabpfn` lazily.
+# Install on demand inside the relevant notebook:
+#   !pip install tabpfn
+# It pulls torch + a large model checkpoint, so it is intentionally NOT pinned here.

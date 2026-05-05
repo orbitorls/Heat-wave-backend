@@ -1,0 +1,59 @@
+# HeatShield AI — feature engineering v2 / คอนฟิก feature engineering v2
+# Extended feature set used by 02_train_*.ipynb. Inference at serve time pads any
+# missing columns with metadata["feature_medians"] (see app/ml/forecast/features.py)
+# so column order stays consistent with training.
+# v2 ขยาย lag/rolling จากค่า default ของ codebase. ตอน inference ระบบจะเติม column
+# ที่หายไปด้วย feature_medians ให้เอง (ดู app/ml/forecast/features.py).
+#
+# ⚠ Invariant: every row in X may only use observations with ts_utc <= row.ts_utc;
+# the target uses ts_utc + horizon_h. Any new lag/rolling MUST keep this no-leakage
+# rule (CLAUDE.md → "Feature engineering invariant").
+
+version: v2
+
+# --- temporal lags / rolling windows (in hours) ----------------------------
+# Codebase defaults: lags = [1,3,6,12,24], rolling = [3,6,24]
+# v2 extends to weekly cycles and longer-term anomalies.
+lags_h:    [1, 2, 3, 6, 12, 24, 48, 72, 168]
+rolling_h: [3, 6, 12, 24, 72]
+
+# Extra rolling stats beyond mean — applied to each window above.
+rolling_stats: [mean, std, min, max]
+
+# --- group flags (toggle whole feature families) ---------------------------
+groups:
+  heat_buildup:        true   # consecutive-hour streaks above adaptive percentile
+  ramp:                true   # short-window slopes (Δhi over 3h/6h)
+  persistence:         true   # naive persistence + seasonal-naive baselines as features
+  solar_cloud:         true   # solar_wm2 / cloud cover lags + diurnal interactions
+  local_anomaly:       true   # (current - 30d local percentile) anomaly features
+  station_interaction: true   # station_id × hour-of-day, station × month, etc.
+
+# --- column budget ---------------------------------------------------------
+# Hard cap on total feature count after one-hot + interactions. Trainer must
+# select / drop low-importance features to stay under the budget.
+max_features: 80
+
+# --- selection strategy used when feature count > max_features -------------
+selection:
+  method: importance_gain     # one of: importance_gain | mutual_info | l1
+  refit_after_prune: true
+
+# --- variables consumed (must exist in the parquet store) ------------------
+required_columns:
+  - t2m_c
+  - rh_pct
+  - hi_c
+  - solar_wm2
+  - cloud_pct
+  - wind_ms
+  - lst_c
+  - source
+  - station_id
+  - ts_utc
+
+# --- target spec -----------------------------------------------------------
+target:
+  name: hi_t_plus_h
+  formula: "heat_index(t2m_c[ts_utc + h], rh_pct[ts_utc + h])"
+  unit: celsius

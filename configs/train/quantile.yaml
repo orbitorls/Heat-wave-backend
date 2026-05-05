@@ -1,0 +1,64 @@
+# HeatShield AI — LightGBM quantile config / คอนฟิก quantile สำหรับ LightGBM
+# Trains q05/q50/q95 boosters per (station, horizon) for the v3 lightgbm_quantile backend.
+# เทรน q05/q50/q95 ต่อ (สถานี, horizon) สำหรับ backend ชื่อ lightgbm_quantile.
+
+backend: lightgbm_quantile   # registry backend name
+task: quantile_regression
+target: hi_t_plus_h
+
+seed: 42
+
+stations:
+  - BKK_01
+  - CNX_01
+  - KKN_01
+  - HYI_01
+  - RYG_01
+
+horizons: [6, 12, 24, 48, 72]
+
+data_window:
+  - 2020-01-01
+  - 2024-12-31
+
+# --- quantile levels: median + symmetric 90% PI ----------------------------
+quantiles: [0.05, 0.50, 0.95]
+
+# --- per-quantile params (alpha is patched in by the trainer) --------------
+params:
+  objective: quantile          # alpha set per fit call: 0.05 / 0.50 / 0.95
+  metric: quantile
+  learning_rate: 0.05
+  num_leaves: 63
+  max_depth: -1
+  min_data_in_leaf: 75         # quantile loss is noisier; keep leaves bigger
+  feature_fraction: 0.85
+  bagging_fraction: 0.85
+  bagging_freq: 5
+  lambda_l1: 0.0
+  lambda_l2: 0.0
+  verbose: -1
+
+training:
+  num_boost_round: 2500
+  early_stopping_rounds: 150
+  cv_folds: 5
+  cv_gap_h: 72
+
+optuna:
+  enabled: true
+  trials: 25                   # fewer trials — 3 quantiles × 5 horizons gets expensive
+  timeout_s: 3600
+  pruner: median
+  shared_params_across_quantiles: true   # one HP set, applied to all 3 q-models
+
+# --- coverage diagnostics computed at the end of training ------------------
+diagnostics:
+  target_coverage: 0.90        # nominal PI coverage
+  coverage_tolerance: 0.05     # warn if empirical coverage drifts >5pp
+  pi_width_max_c: 4.0          # see CLAUDE.md (low_confidence threshold)
+
+artifacts:
+  out_root: app/models/forecast_v3
+  save_feature_importance: true
+  save_shap_summary: false

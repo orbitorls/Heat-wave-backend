@@ -1,0 +1,43 @@
+import logging
+
+from fastapi import FastAPI
+from app.api import heat_index, events, risk, whatif, action_card, forecast
+
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="HeatShield AI",
+    description=(
+        "Adaptive Heat-Health Risk Intelligence for School Safety and Outdoor Workers. "
+        "Converts weather data into actionable risk scores and decision support."
+    ),
+    version="0.1.0",
+)
+
+app.include_router(heat_index.router, prefix="/heat-index", tags=["Heat Index"])
+app.include_router(events.router, prefix="/events", tags=["Heatwave Events"])
+app.include_router(risk.router, prefix="/risk", tags=["Risk Scoring"])
+app.include_router(whatif.router, prefix="/whatif", tags=["What-if Simulator"])
+app.include_router(action_card.router, prefix="/action-card", tags=["Action Card"])
+app.include_router(forecast.router, prefix="/forecast", tags=["Forecast"])
+
+
+@app.on_event("startup")
+async def _prewarm_v3_forecasters() -> None:
+    """Pre-load v3 h=24 forecasters at startup to avoid cold-start latency."""
+    from app.ml import registry
+    from app.data.stations import STATIONS
+
+    for sid in STATIONS:
+        try:
+            registry.load_latest_v3(sid, 24)
+            logger.info("Pre-warmed v3 forecaster: station=%s h=24", sid)
+        except FileNotFoundError:
+            pass  # v3 not trained yet — v2 fallback will handle it
+        except Exception as exc:
+            logger.warning("Could not pre-warm v3 for %s: %s", sid, exc)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "HeatShield AI"}

@@ -1,0 +1,23 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+pydantic-settings>=2.4.0
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.5.0
+xgboost>=2.1.0
+lightgbm>=4.5.0
+httpx>=0.27.0
+python-dateutil>=2.9.0
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+tenacity>=8.2.0
+optuna>=3.6.0
+pyarrow>=16.0.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+# ERA5 reanalysis ingestion (optional — scripts/ingest_era5.py)
+cdsapi>=0.7.0
+xarray>=2024.1.0
+netCDF4>=1.7.0
+# NASA POWER / MODIS — NASA POWER uses httpx (already listed); APPEEARS needs no extra deps

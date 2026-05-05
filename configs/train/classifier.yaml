@@ -1,0 +1,66 @@
+# HeatShield AI — LightGBM classifier config / คอนฟิก classifier สำหรับ LightGBM
+# Binary classifier: probability that heat index at ts_utc + horizon_h crosses the
+# Danger threshold (default 41 °C — see configs/risk/thresholds.yaml).
+# Classifier ทำนายความน่าจะเป็นที่ heat index ที่ ts_utc + horizon_h จะแตะระดับ Danger.
+
+task: binary_classification
+target: hi_danger_t_plus_h          # 1 if hi >= danger_threshold_c
+
+seed: 42
+
+stations:
+  - BKK_01
+  - CNX_01
+  - KKN_01
+  - HYI_01
+  - RYG_01
+
+horizons: [6, 12, 24, 48, 72]
+
+data_window:
+  - 2020-01-01
+  - 2024-12-31
+
+# --- threshold definition (mirrors configs/risk/thresholds.yaml) -----------
+labeling:
+  danger_threshold_c: 41.0          # heat index °C; raise/lower in Phase 7 if needed
+  positive_class_weight: auto       # class_weight balanced when extreme imbalance
+
+params:
+  objective: binary
+  metric: [binary_logloss, auc, average_precision]
+  learning_rate: 0.05
+  num_leaves: 63
+  max_depth: -1
+  min_data_in_leaf: 100
+  feature_fraction: 0.85
+  bagging_fraction: 0.85
+  bagging_freq: 5
+  lambda_l1: 0.0
+  lambda_l2: 0.0
+  is_unbalance: true
+  verbose: -1
+
+training:
+  num_boost_round: 2000
+  early_stopping_rounds: 100
+  cv_folds: 5
+  cv_gap_h: 72
+
+optuna:
+  enabled: true
+  trials: 25
+  timeout_s: 3600
+  pruner: median
+  metric: average_precision         # optimize PR-AUC under class imbalance
+
+# --- decision threshold tuning (post-training) -----------------------------
+decision:
+  p_danger_gate: 0.20               # initial gate; will be re-tuned in Phase 7
+  calibration: isotonic             # one of: none | sigmoid | isotonic
+  report_at_thresholds: [0.10, 0.20, 0.30, 0.50]
+
+artifacts:
+  out_root: app/models/forecast_v3
+  save_feature_importance: true
+  save_shap_summary: false

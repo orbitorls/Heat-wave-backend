@@ -1,0 +1,54 @@
+# HeatShield AI — baseline LightGBM config / คอนฟิก baseline สำหรับ LightGBM
+# Used by 02_train_lightgbm.ipynb. Tune via Optuna; this file holds the safe defaults.
+# ใช้ใน 02_train_lightgbm.ipynb. Optuna ปรับจูนต่อจากค่าเริ่มต้นนี้.
+
+backend: lightgbm_hi_quantile  # registry backend name (matches choice_matrix.json)
+task: regression            # mean point forecast for heat index (°C)
+target: hi_t_plus_h         # heat index at ts_utc + horizon_h
+
+seed: 42
+
+stations:                   # closed registry — must match app/data/stations.py
+  - BKK_01
+  - CNX_01
+  - KKN_01
+  - HYI_01
+  - RYG_01
+
+horizons: [6, 12, 24, 48, 72]   # hours ahead
+
+data_window:
+  - 2020-01-01
+  - 2024-12-31
+
+# --- LightGBM hyperparameters (sane defaults for hourly weather regression) ---
+params:
+  objective: regression
+  metric: rmse
+  learning_rate: 0.05
+  num_leaves: 63
+  max_depth: -1
+  min_data_in_leaf: 50
+  feature_fraction: 0.85
+  bagging_fraction: 0.85
+  bagging_freq: 5
+  lambda_l1: 0.0
+  lambda_l2: 0.0
+  verbose: -1
+
+training:
+  num_boost_round: 2000
+  early_stopping_rounds: 100
+  cv_folds: 5                 # time-series CV (no shuffle)
+  cv_gap_h: 72                # gap between train/valid to avoid horizon leakage
+
+optuna:
+  enabled: true
+  trials: 30
+  timeout_s: 3600
+  pruner: median
+
+artifacts:
+  out_root: app/models/forecast_v3   # written through the Drive symlink in Colab
+  save_feature_importance: true
+  save_shap_summary: false

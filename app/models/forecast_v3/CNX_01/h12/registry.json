@@ -1,0 +1,250 @@
+{
+  "backend_name": "lightgbm_quantile",
+  "feature_list": [
+    "wind_ms",
+    "precip_mm",
+    "solar_wm2",
+    "cloud_cover",
+    "pressure_hpa",
+    "hour_sin",
+    "hour_cos",
+    "local_hour_sin",
+    "local_hour_cos",
+    "doy_sin",
+    "doy_cos",
+    "month",
+    "station_enc",
+    "lat",
+    "lon",
+    "elevation_m",
+    "heat_index_c_lag1h",
+    "heat_index_c_lag3h",
+    "heat_index_c_lag6h",
+    "heat_index_c_lag12h",
+    "heat_index_c_lag24h",
+    "temp_c_lag1h",
+    "temp_c_lag3h",
+    "temp_c_lag6h",
+    "temp_c_lag12h",
+    "temp_c_lag24h",
+    "rh_lag1h",
+    "rh_lag3h",
+    "rh_lag6h",
+    "rh_lag12h",
+    "rh_lag24h",
+    "hi_change_3h",
+    "temp_change_3h",
+    "heat_index_c_roll3h_mean",
+    "heat_index_c_roll3h_std",
+    "heat_index_c_roll6h_mean",
+    "heat_index_c_roll6h_std",
+    "heat_index_c_roll24h_mean",
+    "heat_index_c_roll24h_std",
+    "temp_c_roll3h_mean",
+    "temp_c_roll3h_std",
+    "temp_c_roll6h_mean",
+    "temp_c_roll6h_std",
+    "temp_c_roll24h_mean",
+    "temp_c_roll24h_std",
+    "temp_x_rh",
+    "temp_x_evening",
+    "solar_wm2_lag1h",
+    "solar_wm2_lag3h",
+    "solar_wm2_lag6h",
+    "solar_wm2_roll6h_mean",
+    "temp_x_solar",
+    "cloud_cover_lag1h",
+    "cloud_cover_lag3h",
+    "cloud_cover_lag6h",
+    "pressure_hpa_lag1h",
+    "pressure_hpa_lag3h",
+    "pressure_hpa_lag6h",
+    "wind_ms_lag1h",
+    "wind_ms_lag3h",
+    "precip_mm_lag1h",
+    "precip_mm_lag3h",
+    "_hi_clim",
+    "hi_residual_lag1h"
+  ],
+  "target_kind": "th",
+  "station_id": "CNX_01",
+  "horizon_h": 12,
+  "run_id": "20260505T053817Z",
+  "status": "candidate",
+  "n_train_rows": 12255,
+  "horizons": [
+    6,
+    12,
+    24,
+    48,
+    72
+  ],
+  "evaluation": {
+    "horizon_h": 12,
+    "regression": {
+      "mae": 1.103346220410336,
+      "rmse": 1.9386882627296214,
+      "bias": 0.2136290469053599,
+      "correlation": 0.9540278833400646,
+      "p50_abs_error": 0.808592965447394,
+      "p90_abs_error": 2.2843456293005677,
+      "p95_abs_error": 2.847763188110694
+    },
+    "baselines": {
+      "persistence_mae": 7.710040134949325,
+      "climatology_mae": 1.5563918473738478,
+      "skill_score": 0.29108712418916294
+    },
+    "risk": {
+      "labels": [
+        "Caution",
+        "Extreme Caution",
+        "Danger",
+        "Extreme Danger"
+      ],
+      "classification_report": {
+        "Caution": {
+          "precision": 0.9907949790794979,
+          "recall": 0.9724845995893224,
+          "f1-score": 0.9815544041450778,
+          "support": 2435.0
+        },
+        "Extreme Caution": {
+          "precision": 0.717391304347826,
+          "recall": 0.859375,
+          "f1-score": 0.7819905213270142,
+          "support": 192.0
+        },
+        "Danger": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1-score": 0.0,
+          "support": 0.0
+        },
+        "Extreme Danger": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1-score": 0.0,
+          "support": 0.0
+        },
+        "accuracy": 0.9642177388656262,
+        "macro avg": {
+          "precision": 0.42704657085683095,
+          "recall": 0.4579648998973306,
+          "f1-score": 0.44088623136802296,
+          "support": 2627.0
+        },
+        "weighted avg": {
+          "precision": 0.970812677766791,
+          "recall": 0.9642177388656262,
+          "f1-score": 0.9669688443806819,
+          "support": 2627.0
+        }
+      },
+      "confusion_matrix": [
+        [
+          2368,
+          65,
+          0,
+          2
+        ],
+        [
+          22,
+          165,
+          0,
+          5
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "confusion_matrix_normalized": [
+        [
+          0.9724845995893224,
+          0.026694045174537988,
+          0.0,
+          0.0008213552361396304
+        ],
+        [
+          0.11458333333333333,
+          0.859375,
+          0.0,
+          0.026041666666666668
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ]
+    },
+    "safety": {
+      "danger_40": {
+        "support": 0,
+        "recall": null,
+        "false_negative_rate": null
+      },
+      "danger_42": {
+        "support": 0,
+        "recall": null,
+        "false_negative_rate": null
+      }
+    },
+    "prediction_interval": {
+      "available": true,
+      "coverage_90": 0.9200609059763989,
+      "mean_width": 9.513518592450929,
+      "p25_width": 4.119423973002842,
+      "p75_width": 12.647542177412634,
+      "width_ratio": 3.070221045539346,
+      "pinball_q05": 0.25951564999630394,
+      "pinball_q95": 0.28675629772440697
+    },
+    "runtime": {
+      "feature_rows": 2627,
+      "train_seconds": 196.16400570000405,
+      "eval_seconds": 0.011915999995835591
+    },
+    "split": {
+      "horizon_h": 12,
+      "row_counts": {
+        "train": 12255,
+        "val": 2626,
+        "test": 2627
+      },
+      "date_ranges": {
+        "train": {
+          "start": "2023-05-02 00:00:00+00:00",
+          "end": "2024-09-23 14:00:00+00:00"
+        },
+        "val": {
+          "start": "2024-09-23 15:00:00+00:00",
+          "end": "2025-01-11 00:00:00+00:00"
+        },
+        "test": {
+          "start": "2025-01-11 01:00:00+00:00",
+          "end": "2025-04-30 11:00:00+00:00"
+        }
+      },
+      "stations": [
+        "CNX_01"
+      ]
+    }
+  }
+}

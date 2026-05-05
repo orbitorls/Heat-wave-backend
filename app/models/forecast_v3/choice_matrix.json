@@ -1,0 +1,37 @@
+{
+  "BKK_01": {
+    "24": "lightgbm_quantile",
+    "6": "lightgbm_quantile",
+    "12": "lightgbm_quantile",
+    "48": "lightgbm_quantile",
+    "72": "lightgbm_quantile"
+  },
+  "CNX_01": {
+    "6": "lightgbm_quantile",
+    "12": "lightgbm_quantile",
+    "24": "lightgbm_quantile",
+    "48": "lightgbm_quantile",
+    "72": "lightgbm_quantile"
+  },
+  "KKN_01": {
+    "6": "lightgbm_quantile",
+    "12": "lightgbm_quantile",
+    "24": "lightgbm_quantile",
+    "48": "lightgbm_quantile",
+    "72": "lightgbm_quantile"
+  },
+  "HYI_01": {
+    "6": "lightgbm_quantile",
+    "12": "lightgbm_quantile",
+    "24": "lightgbm_quantile",
+    "48": "lightgbm_quantile",
+    "72": "lightgbm_quantile"
+  },
+  "RYG_01": {
+    "6": "lightgbm_quantile",
+    "12": "lightgbm_quantile",
+    "24": "lightgbm_quantile",
+    "48": "lightgbm_quantile",
+    "72": "lightgbm_quantile"
+  }
+}

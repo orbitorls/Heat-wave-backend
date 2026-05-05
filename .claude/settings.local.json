@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /d D:\\\\Heat-wave-backend)",
+      "Bash(python -m venv .venv)",
+      "Bash(Get-ChildItem -Recurse -Depth 3 -Directory)",
+      "Bash(Select-Object FullName)",
+      "Bash(Sort-Object FullName)",
+      "Bash(Format-Table -AutoSize)",
+      "PowerShell(New-Item *)",
+      "Bash(.venv/Scripts/pip install *)",
+      "Bash(python *)",
+      "PowerShell(Test-Path *)",
+      "Bash(Get-Content \"C:\\\\Users\\\\Lenovo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\D--Heat-wave-backend\\\\bfa32fb6-0ee6-45de-b28b-8383002182a3\\\\tasks\\\\bi22ul9h6.output\")",
+      "Bash(Select-Object -Last 30)",
+      "PowerShell(Get-Process *)",
+      "PowerShell(cd D:\\\\Heat-wave-backend; $env:CDSAPI_KEY=\"10aa1926-af5c-49c0-847b-d86976c2b9ae\"; $env:CDSAPI_URL=\"https://cds.climate.copernicus.eu/api\"; python scripts/ingest_era5.py --station BKK_01 --start 2024-01-01 --end 2024-01-01 2>&1)",
+      "PowerShell(cd D:\\\\Heat-wave-backend; $env:CDSAPI_KEY=\"10aa1926-af5c-49c0-847b-d86976c2b9ae\"; $env:CDSAPI_URL=\"https://cds.climate.copernicus.eu/api\"; python scripts/ingest_era5.py --start 2018-01-01 --end 2025-04-30 2>&1)",
+      "Bash(Out-String -Stream)",
+      "Bash(Select-String \"\\\\.parquet$\")",
+      "Bash(Measure-Object -Line)",
+      "Bash(Select-Object -ExpandProperty Lines)",
+      "WebSearch",
+      "Bash(Get-ChildItem \"D:\\\\Heat-wave-backend\\\\data\\\\era5_cache\" -Filter \"*.nc\")",
+      "Bash(Measure-Object)",
+      "Bash(Select-Object -ExpandProperty Count)",
+      "Bash(.\\\\.venv\\\\Scripts\\\\python.exe scripts/train_forecast.py --station BKK_01 --horizons 24 --trials 5)"
+    ]
+  }
+}

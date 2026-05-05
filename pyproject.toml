@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "heatshield-ai"
+version = "0.1.0"
+description = "Adaptive Heat-Health Risk Intelligence for School Safety and Outdoor Workers"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra -m 'not slow'"
+asyncio_mode = "auto"
+markers = [
+    "slow: requires real ingested data + trained model (run with: pytest -m slow)",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]

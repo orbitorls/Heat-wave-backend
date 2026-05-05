@@ -1,0 +1,559 @@
+"""CLI training script for the HeatShield AI heat-index forecast model.
+
+Usage:
+    # Multi-horizon (default, trains all 5 horizons):
+    python scripts/train_forecast.py [--station BKK_01] [--trials 30]
+
+    # Custom horizons:
+    python scripts/train_forecast.py --horizons 6,24,48
+
+    # Legacy single-horizon (falls back to single-horizon save):
+    python scripts/train_forecast.py --horizon 24 [--station BKK_01] [--trials 30]
+
+Reads parquet data from data/raw/, builds features, trains XGBoost,
+saves model to app/models/forecast_v{n}/ directory.
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import subprocess
+import sys
+import os
+import time
+from datetime import date, datetime, timezone, timedelta
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+import pandas as pd
+
+from app.data.loaders import read_observations
+from app.data.stations import STATIONS
+from app.ml.forecast.features import build_features, build_X_once, build_y_for_horizon, _DEFAULT_LAGS_H, _DEFAULT_ROLLING_H
+from app.ml.forecast.train import train
+from app.ml.forecast.evaluation import evaluate_predictions
+from app.ml.forecast.splitting import split_xy
+from app.ml.registry import save_model
+from app.ml.viz import generate_report
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
+
+def _git_sha() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def _fmt_metrics(metrics: dict) -> dict:
+    return {k: f"{v:.4f}" if not (isinstance(v, float) and v != v) else "nan" for k, v in metrics.items()}
+
+
+def _quality_status(metrics: dict) -> str:
+    skill = metrics.get("baselines", {}).get("skill_score", metrics.get("skill_score", 0.0))
+    danger = metrics.get("safety", {}).get("danger_42", {}).get("recall", metrics.get("danger_recall", 0.0))
+    pi = metrics.get("prediction_interval", {})
+    coverage = pi.get("coverage_90") if pi.get("available") else None
+    if skill < 0.15:
+        return "not_ready"
+    if coverage is not None and not (0.85 <= coverage <= 0.93):
+        return "candidate"
+    if skill >= 0.55 and (danger is None or danger != danger or danger >= 0.40):
+        return "ready"
+    return "candidate"
+
+
+_EVAL_CHART_NAMES = [
+    "confusion_matrix.png",
+    "classification_report.png",
+    "pred_vs_actual.png",
+    "error_by_hour.png",
+    "error_by_station.png",
+    "error_heatmap.png",
+    "pi_calibration.png",
+    "pi_width.png",
+]
+
+def _next_version_dir() -> Path:
+    """Return the next logs/eval/v{n}/ folder that does not yet exist."""
+    base = Path("logs") / "eval"
+    base.mkdir(parents=True, exist_ok=True)
+    existing = [
+        int(d.name[1:])
+        for d in base.iterdir()
+        if d.is_dir() and d.name.startswith("v") and d.name[1:].isdigit()
+    ]
+    n = (max(existing) + 1) if existing else 1
+    return base / f"v{n}"
+
+
+def _export_run_to_versioned_dir(run_dir: Path, primary_station: str = "BKK_01", primary_h: int = 24) -> Path:
+    """Copy run charts into a new logs/eval/v{n}/ folder — flat layout matching v1/v2.
+
+    Structure written:
+      logs/eval/v{n}/confusion_matrix.png
+      logs/eval/v{n}/classification_report.png
+      logs/eval/v{n}/pred_vs_actual.png
+      logs/eval/v{n}/error_by_hour.png
+      logs/eval/v{n}/error_by_station.png
+      logs/eval/v{n}/error_heatmap.png
+      logs/eval/v{n}/pi_calibration.png
+      logs/eval/v{n}/pi_width.png
+      logs/eval/v{n}/summary.png
+      logs/eval/v{n}/leaderboard.md
+      logs/eval/v{n}/leaderboard.json
+
+    The 8 per-slot charts come from the primary slot (primary_station/h{primary_h}).
+    Falls back to the first available slot if primary is missing.
+    """
+    import shutil
+
+    dest = _next_version_dir()
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # Locate primary slot dir: run_dir/{backend}/{station}/h{H}/
+    primary_dir: Path | None = None
+    for candidate in sorted(run_dir.rglob(f"h{primary_h}")):
+        if candidate.is_dir() and candidate.parent.name == primary_station:
+            primary_dir = candidate
+            break
+    if primary_dir is None:
+        # Fall back to first slot found
+        for name in _EVAL_CHART_NAMES:
+            hits = sorted(run_dir.rglob(name))
+            if hits:
+                primary_dir = hits[0].parent
+                break
+
+    # Copy the 8 charts flat into dest
+    if primary_dir:
+        for name in _EVAL_CHART_NAMES:
+            src = primary_dir / name
+            if src.exists():
+                shutil.copy2(src, dest / name)
+
+    # Copy summary + leaderboard
+    for fname in ("summary.png", "leaderboard.md", "leaderboard.json"):
+        src = run_dir / fname
+        if src.exists():
+            shutil.copy2(src, dest / fname)
+
+    logger.info("Run exported to %s", dest.resolve())
+    return dest
+
+
+def _display_eval_charts(run_dir: Path) -> None:
+    """Print all eval chart paths and open via OS image viewer (Windows)."""
+    found: list[Path] = []
+    for name in _EVAL_CHART_NAMES:
+        found.extend(sorted(run_dir.rglob(name)))
+    if not found:
+        return
+
+    logger.info("=" * 60)
+    logger.info("POST-TRAINING EVAL CHARTS (%d files)", len(found))
+    logger.info("=" * 60)
+    prev_slot = None
+    for p in found:
+        slot = str(p.parent.relative_to(run_dir))
+        if slot != prev_slot:
+            logger.info("")
+            logger.info("[%s]", slot)
+            prev_slot = slot
+        logger.info("  EVAL_CHART: %s", p.resolve())
+
+    logger.info("")
+    logger.info("=" * 60)
+
+    if sys.platform == "win32":
+        for p in found:
+            try:
+                os.startfile(str(p))
+            except Exception:
+                pass
+
+
+def _generate_summary_chart(run_dir: Path, rows: list[dict]) -> Path:
+    """Create a single-page summary: MAE / skill / danger-recall heatmaps across station × horizon."""
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    import numpy as np
+
+    stations = sorted({r["station"] for r in rows})
+    horizons = sorted({r["horizon_h"] for r in rows})
+
+    def _grid(metric: str, default=float("nan")) -> np.ndarray:
+        def _safe(v):
+            return float("nan") if v is None else float(v)
+        lookup = {(r["station"], r["horizon_h"]): _safe(r.get(metric, default)) for r in rows}
+        return np.array([[lookup.get((s, h), float("nan")) for h in horizons] for s in stations], dtype=float)
+
+    mae_grid = _grid("mae")
+    skill_grid = _grid("skill_score")
+    danger_grid = _grid("danger_recall_42")
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, max(3, len(stations) * 1.2 + 2)))
+    fig.suptitle(f"Training Run Summary  —  {run_dir.name}", fontsize=13, fontweight="bold")
+
+    h_labels = [f"h{h}" for h in horizons]
+
+    def _heatmap(ax, data, title, cmap, vmin, vmax, fmt=".2f", bad_color="#cccccc"):
+        masked = np.ma.masked_invalid(data)
+        im = ax.imshow(masked, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+        ax.set_xticks(range(len(horizons))); ax.set_xticklabels(h_labels, fontsize=9)
+        ax.set_yticks(range(len(stations))); ax.set_yticklabels(stations, fontsize=9)
+        ax.set_title(title, fontsize=11, fontweight="bold", pad=8)
+        plt.colorbar(im, ax=ax, shrink=0.8)
+        for i in range(len(stations)):
+            for j in range(len(horizons)):
+                v = data[i, j]
+                if not np.isnan(v):
+                    ax.text(j, i, format(v, fmt), ha="center", va="center", fontsize=8,
+                            color="white" if abs(v - (vmin + vmax) / 2) > (vmax - vmin) * 0.2 else "black")
+
+    _heatmap(axes[0], mae_grid,    "MAE (°C)\nlow = good",      "RdYlGn_r", 1.0, 4.0)
+    _heatmap(axes[1], skill_grid,  "Skill Score\nhigh = good",  "RdYlGn",   0.0, 1.0)
+    _heatmap(axes[2], danger_grid, "Danger Recall ≥42°C\nhigh = good", "RdYlGn", 0.0, 1.0)
+
+    plt.tight_layout()
+    out = run_dir / "summary.png"
+    plt.savefig(out, dpi=130, bbox_inches="tight")
+    plt.close()
+    return out
+
+
+def _write_leaderboard(run_dir: Path, rows: list[dict]) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "leaderboard.json").write_text(
+        __import__("json").dumps(rows, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    lines = [
+        "| Backend | Station | Horizon | MAE | Skill | Danger Recall >=42C | Status |",
+        "|---|---|---:|---:|---:|---:|---|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row['backend']} | {row['station']} | {row['horizon_h']} | "
+            f"{row.get('mae', float('nan')):.3f} | {row.get('skill_score', float('nan')):.3f} | "
+            f"{(row['danger_recall_42'] if row.get('danger_recall_42') is not None else float('nan')):.3f} | {row['status']} |"
+        )
+    (run_dir / "leaderboard.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train HeatShield AI forecast model")
+    parser.add_argument(
+        "--horizon", type=int, default=None,
+        help="Legacy single-horizon flag in hours. If set, overrides --horizons and uses single-horizon save.",
+    )
+    parser.add_argument(
+        "--horizons", type=str, default="6,12,24,48,72",
+        help="Comma-separated forecast horizons in hours (default: 6,12,24,48,72)",
+    )
+    parser.add_argument("--station", type=str, default=None, help="Single station to train on (default: all)")
+    parser.add_argument("--trials", type=int, default=100, help="Number of optuna trials (default: 100)")
+    parser.add_argument("--start", type=str, default=None, help="Data start date YYYY-MM-DD (default: 2 years ago)")
+    parser.add_argument("--end", type=str, default=None, help="Data end date YYYY-MM-DD (default: yesterday)")
+    parser.add_argument("--backend", type=str, default="lightgbm",
+                        choices=["xgboost", "lightgbm", "lightgbm_hi"],
+                        help="Model backend to train (default: lightgbm)")
+    parser.add_argument("--target-kind", type=str, default="th",
+                        choices=["hi", "th"],
+                        dest="target_kind",
+                        help="Prediction target: hi=direct heat-index, th=temp+rh two-head (default: th)")
+    args = parser.parse_args()
+
+    end_date = date.fromisoformat(args.end) if args.end else date.today() - timedelta(days=1)
+    start_date = date.fromisoformat(args.start) if args.start else end_date - timedelta(days=730)
+
+    # Resolve horizons list — legacy --horizon overrides --horizons
+    if args.horizon is not None:
+        horizons = [args.horizon]
+        legacy_single = True
+        logger.info("Legacy --horizon mode: training single horizon=%dh", args.horizon)
+    else:
+        horizons = [int(h.strip()) for h in args.horizons.split(",") if h.strip()]
+        legacy_single = len(horizons) == 1
+        logger.info("Multi-horizon mode: training horizons=%s", horizons)
+
+    station_ids = [args.station] if args.station else list(STATIONS.keys())
+    logger.info("Training for stations=%s trials=%d", station_ids, args.trials)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    eval_run_dir = Path("logs") / "eval" / "runs" / run_id
+    leaderboard: list[dict] = []
+
+    if args.backend in {"lightgbm", "lightgbm_hi"}:
+        from app.ml.forecast.backends.lgbm_backend import LGBMDirectHIForecaster, LGBMForecaster
+        from app.ml import registry
+        target_kind = "hi" if args.backend == "lightgbm_hi" else args.target_kind
+
+        from app.ml.forecast.backends.lgbm_backend import _compute_hi_array
+        for sid in station_ids:
+            obs = read_observations(sid, start_date, end_date)
+            if len(obs) < 500:
+                logger.warning("Too few rows (%d) for station=%s — skipping", len(obs), sid)
+                continue
+
+            # Build features ONCE per station — avoids rebuilding X for every horizon
+            X_full, df_aug = build_X_once(obs)
+
+            for h in horizons:
+                logger.info("Training LightGBM backend: station=%s horizon=%d target=%s",
+                            sid, h, target_kind)
+                y_full = build_y_for_horizon(df_aug, X_full.index, h, target_kind=target_kind)
+
+                # Apply valid mask (y must be non-null)
+                if isinstance(y_full, pd.DataFrame):
+                    valid = y_full.notna().all(axis=1)
+                else:
+                    valid = y_full.notna()
+                X = X_full[valid]
+                y = y_full[valid]
+
+                if len(X) < 500:
+                    logger.warning(
+                        "Too few rows (%d) after target NaN-drop for station=%s h=%d — skipping",
+                        len(X), sid, h,
+                    )
+                    continue
+
+                forecaster_cls = LGBMDirectHIForecaster if args.backend == "lightgbm_hi" else LGBMForecaster
+                forecaster = forecaster_cls(n_trials=args.trials if hasattr(args, 'trials') else 50)
+                forecaster.fit(X, y, station_id=sid, horizon_h=h)
+
+                split = split_xy(X, y, horizon_h=h)
+                bundle = forecaster.predict_with_pi(split.X_test)
+                if target_kind == "th":
+                    y_true = _compute_hi_array(split.y_test["temp_c"].values, split.y_test["rh"].values)
+                else:
+                    y_true = split.y_test.values
+                out_dir = eval_run_dir / forecaster.backend_name / sid / f"h{h}"
+                eval_metrics = evaluate_predictions(
+                    y_true,
+                    bundle.hi_mean,
+                    split.X_test,
+                    out_dir=out_dir,
+                    horizon_h=h,
+                    station_labels={0: sid},
+                    q05=bundle.hi_lower,
+                    q95=bundle.hi_upper,
+                    runtime={"train_seconds": forecaster._metadata.get("train_seconds", 0.0)},
+                    split_metadata=split.metadata,
+                )
+                status = _quality_status(eval_metrics)
+                metrics = {
+                    "run_id": run_id,
+                    "status": status,
+                    "n_train_rows": split.metadata["row_counts"]["train"],
+                    "horizons": horizons,
+                    "evaluation": eval_metrics,
+                }
+                registry.save_model_v3(forecaster, metrics, sid, h)
+                leaderboard.append({
+                    "backend": forecaster.backend_name,
+                    "station": sid,
+                    "horizon_h": h,
+                    "mae": eval_metrics["regression"]["mae"],
+                    "skill_score": eval_metrics["baselines"]["skill_score"],
+                    "danger_recall_42": eval_metrics["safety"]["danger_42"]["recall"],
+                    "status": status,
+                    "eval_dir": str(out_dir),
+                })
+                logger.info("Saved LightGBM v3: station=%s h=%d", sid, h)
+
+        _write_leaderboard(eval_run_dir, leaderboard)
+        logger.info("LightGBM v3 training complete")
+        try:
+            summary_path = _generate_summary_chart(eval_run_dir, leaderboard)
+            logger.info("Summary chart: %s", summary_path.resolve())
+        except Exception as e:
+            logger.warning("Summary chart failed: %s", e)
+        try:
+            _export_run_to_versioned_dir(eval_run_dir)
+        except Exception as e:
+            logger.warning("versioned export failed: %s", e)
+        _display_eval_charts(eval_run_dir)
+
+        return  # don't fall through to XGBoost path
+
+    # Load and concatenate observations from all stations
+    frames: list[pd.DataFrame] = []
+    for sid in station_ids:
+        df = read_observations(sid, start_date, end_date)
+        if df.empty:
+            logger.warning("No data found for station=%s — skipping", sid)
+            continue
+        df["station_id"] = sid
+        frames.append(df)
+
+    if not frames:
+        logger.error("No data loaded. Run scripts/build_historical.py first to ingest data.")
+        sys.exit(1)
+
+    all_data = pd.concat(frames, ignore_index=True)
+    logger.info("Loaded %d total observations across %d stations", len(all_data), len(frames))
+
+    # ------------------------------------------------------------------ #
+    # Train each horizon
+    # ------------------------------------------------------------------ #
+    all_horizon_results: dict[int, dict] = {}
+    for horizon_h in horizons:
+        logger.info("=" * 50)
+        logger.info("Training horizon = %dh", horizon_h)
+
+        X, y = build_features(
+            all_data.copy(),
+            horizon_h=horizon_h,
+            lags_h=_DEFAULT_LAGS_H,
+            rolling_h=_DEFAULT_ROLLING_H,
+        )
+        logger.info("Feature matrix shape for h%d: %s", horizon_h, X.shape)
+
+        if len(X) < 500:
+            logger.error(
+                "Only %d training rows for horizon=%dh after feature engineering. "
+                "Need at least 500. Ingest more historical data first.",
+                len(X), horizon_h,
+            )
+            sys.exit(1)
+
+        result = train(X, y, station_id=",".join(station_ids), horizon_h=horizon_h, n_trials=args.trials)
+        all_horizon_results[horizon_h] = result
+        logger.info("h%d metrics: %s", horizon_h, _fmt_metrics(result["metrics"]))
+        preds = result["test_predictions"]
+        test_data = result["test_data"]
+        out_dir = eval_run_dir / "xgboost_hi" / "all" / f"h{horizon_h}"
+        eval_metrics = evaluate_predictions(
+            test_data["y"].values,
+            preds["mean"],
+            test_data["X"],
+            out_dir=out_dir,
+            horizon_h=horizon_h,
+            station_labels={i: sid for i, sid in enumerate(sorted(station_ids))},
+            q05=preds.get("q05"),
+            q95=preds.get("q95"),
+            runtime={"train_seconds": result["training"]["train_seconds"]},
+            split_metadata=result["split_metadata"],
+        )
+        status = _quality_status(eval_metrics)
+        result["evaluation"] = eval_metrics
+        result["status"] = status
+        leaderboard.append({
+            "backend": "xgboost_hi",
+            "station": "all",
+            "horizon_h": horizon_h,
+            "mae": eval_metrics["regression"]["mae"],
+            "skill_score": eval_metrics["baselines"]["skill_score"],
+            "danger_recall_42": eval_metrics["safety"]["danger_42"]["recall"],
+            "status": status,
+            "eval_dir": str(out_dir),
+        })
+
+    logger.info("=" * 50)
+
+    # ------------------------------------------------------------------ #
+    # Save model
+    # ------------------------------------------------------------------ #
+    if legacy_single:
+        # Single-horizon save (original v2 single-horizon behavior)
+        only_h = horizons[0]
+        result = all_horizon_results[only_h]
+        feature_medians = result["feature_medians"]
+        metadata = {
+            "horizon_h": only_h,
+            "stations": station_ids,
+            "data_window": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+            "n_train_rows": len(X),
+            "feature_list": result["feature_list"],
+            "feature_medians": feature_medians,
+            "hyperparams": result["hyperparams"],
+            "metrics": result["metrics"],
+            "evaluation": result["evaluation"],
+            "status": result["status"],
+            "git_sha": _git_sha(),
+            "roles": ["mean", "q05", "q95"],
+            "seeds": [42, 123, 7],
+        }
+        ensemble_payload = {"all_boosters": result["all_boosters"]}
+        model_path = save_model(ensemble_payload, metadata, kind="forecast")
+    else:
+        # Multi-horizon save
+        horizons_payload = {
+            "horizons": {
+                h: {"all_boosters": all_horizon_results[h]["all_boosters"]}
+                for h in horizons
+            }
+        }
+
+        # Use h24 as primary for backward compat, fall back to first horizon
+        h24_result = all_horizon_results.get(24, next(iter(all_horizon_results.values())))
+        primary_h = 24 if 24 in all_horizon_results else horizons[0]
+
+        metadata = {
+            "horizon_h": primary_h,
+            "horizons": horizons,
+            "stations": station_ids,
+            "data_window": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+            "n_train_rows": sum(len(all_data) for _ in horizons),  # approximate
+            "feature_list": h24_result["feature_list"],
+            "feature_medians": h24_result["feature_medians"],
+            "hyperparams": h24_result["hyperparams"],
+            "metrics": h24_result["metrics"],
+            "evaluation": h24_result["evaluation"],
+            "status": h24_result["status"],
+            "git_sha": _git_sha(),
+            "roles": ["mean", "q05", "q95"],
+            "seeds": [42, 123, 7],
+            "per_horizon_metrics": {h: all_horizon_results[h]["metrics"] for h in horizons},
+            "per_horizon_evaluation": {h: all_horizon_results[h]["evaluation"] for h in horizons},
+        }
+        model_path = save_model(horizons_payload, metadata, kind="forecast")
+
+    logger.info("Model saved to %s", model_path)
+    _write_leaderboard(eval_run_dir, leaderboard)
+    logger.info("Evaluation artifacts saved to %s", eval_run_dir)
+
+    # ------------------------------------------------------------------ #
+    # Generate visualizations (use primary / only horizon)
+    # ------------------------------------------------------------------ #
+    primary_h = horizons[0] if legacy_single else (24 if 24 in all_horizon_results else horizons[0])
+    metadata_path = model_path / "metadata.json" if model_path.is_dir() else model_path.with_suffix(".json")
+    if model_path.is_dir() and (model_path / f"h{primary_h}").exists():
+        booster_path = model_path / f"h{primary_h}" / "mean_s42.ubj"
+    elif model_path.is_dir() and (model_path / "mean_s42.ubj").exists():
+        booster_path = model_path / "mean_s42.ubj"
+    else:
+        booster_path = model_path
+
+    try:
+        image_paths = generate_report(metadata_path, booster_path)
+        logger.info("Generated %d visualization(s):", len(image_paths))
+        for img_path in image_paths:
+            logger.info("  %s", img_path)
+    except Exception as e:
+        logger.error("Failed to generate visualizations: %s", e)
+
+    # ------------------------------------------------------------------ #
+    # Final quality gate (use primary horizon metrics)
+    # ------------------------------------------------------------------ #
+    primary_result = all_horizon_results.get(primary_h, next(iter(all_horizon_results.values())))
+    skill = primary_result["metrics"]["skill_score"]
+    if skill >= 0.15:
+        logger.info("skill_score=%.3f >= 0.15 — model is READY to ship.", skill)
+    else:
+        logger.warning(
+            "skill_score=%.3f < 0.15 — model does NOT beat baselines enough. "
+            "Do not use in production. Ingest more data or tune features.",
+            skill,
+        )
+
+
+if __name__ == "__main__":
+    main()
