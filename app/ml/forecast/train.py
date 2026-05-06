@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -35,6 +36,23 @@ from app.ml.forecast.splitting import (
 
 logger = logging.getLogger(__name__)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+def _gpu_xgb_params() -> dict:
+    """Return XGBoost device params — CUDA if available, CPU otherwise."""
+    if os.getenv("HEATSHIELD_FORCE_CPU") == "1":
+        return {"tree_method": "hist", "device": "cpu"}
+    try:
+        info = xgb.build_info()
+        if info.get("USE_CUDA"):
+            return {"tree_method": "hist", "device": "cuda"}
+    except Exception:
+        pass
+    return {"tree_method": "hist", "device": "cpu"}
+
+
+# _GPU_XGB_PARAMS intentionally not cached — callers use _gpu_xgb_params() so
+# env var changes (HEATSHIELD_FORCE_CPU) made after import are respected.
 
 _LOGS_DIR = Path(__file__).parents[3] / "logs" / "train_runs"
 _DEFAULT_LAGS_H = [1, 3, 6, 12, 24]
@@ -88,6 +106,7 @@ def _make_sample_weight(y: np.ndarray) -> np.ndarray:
 
 def _objective(trial: optuna.Trial, X: pd.DataFrame, y: pd.Series, horizon_h: int) -> float:
     params = {
+        **_gpu_xgb_params(),
         "objective": "reg:squarederror",
         "eval_metric": "mae",
         "max_depth": trial.suggest_int("max_depth", 3, 10),
@@ -106,7 +125,7 @@ def _objective(trial: optuna.Trial, X: pd.DataFrame, y: pd.Series, horizon_h: in
     maes: list[float] = []
     X_arr = X.values
     y_arr = y.values
-    for train_idx, val_idx in time_series_cv_splits(X, horizon_h=horizon_h, n_splits=5):
+    for k, (train_idx, val_idx) in enumerate(time_series_cv_splits(X, horizon_h=horizon_h, n_splits=5)):
         Xt, Xv = X_arr[train_idx], X_arr[val_idx]
         yt, yv = y_arr[train_idx], y_arr[val_idx]
         sw_t = _make_sample_weight(yt)
@@ -121,6 +140,9 @@ def _objective(trial: optuna.Trial, X: pd.DataFrame, y: pd.Series, horizon_h: in
         )
         preds = bst.predict(dval)
         maes.append(mean_absolute_error(yv, preds))
+        trial.report(float(np.mean(maes)), step=k)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
 
     return float(np.mean(maes))
 
@@ -160,7 +182,11 @@ def train(
 
     # --- Optuna hyperparameter search on mean objective ---
     sampler = optuna.samplers.TPESampler(seed=random_state)
-    study = optuna.create_study(direction="minimize", sampler=sampler)
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=sampler,
+        pruner=optuna.pruners.HyperbandPruner(min_resource=2, max_resource=5, reduction_factor=3),
+    )
 
     def objective(trial: optuna.Trial) -> float:
         return _objective(trial, X_train, y_train, horizon_h)
@@ -185,7 +211,7 @@ def train(
     sw_trainval = _make_sample_weight(y_trainval.values)
 
     # Determine best n_rounds via early stopping on the mean booster using train/val split
-    es_params = {**best_params, "objective": "reg:squarederror", "eval_metric": "mae"}
+    es_params = {**_gpu_xgb_params(), **best_params, "objective": "reg:squarederror", "eval_metric": "mae"}
     d_es_train = xgb.DMatrix(X_train.values, label=y_train.values, weight=sw_train,
                               feature_names=list(X.columns))
     d_es_val = xgb.DMatrix(X_val.values, label=y_val.values, feature_names=list(X.columns))
@@ -207,7 +233,7 @@ def train(
 
     for seed in _SEEDS:
         for role, extra_params in _ROLES.items():
-            params = {**best_params, **extra_params, "seed": seed, "verbosity": 0}
+            params = {**_gpu_xgb_params(), **best_params, **extra_params, "seed": seed, "verbosity": 0}
             sw = sw_trainval
             d_tv = xgb.DMatrix(X_trainval.values, label=y_trainval.values, weight=sw,
                                 feature_names=list(X.columns))

@@ -422,8 +422,10 @@ def load_latest_v3(station_id: str, horizon_h: int):
         from app.ml.forecast.backends.xgb_backend import XGBForecaster
         return XGBForecaster.load(slot_dir)
     elif backend_name == "tabpfn":
-        from app.ml.forecast.backends.tabpfn_backend import TabPFNForecaster
-        return TabPFNForecaster.load(slot_dir)
+        raise NotImplementedError(
+            "TabPFN backend is not yet implemented. "
+            "Re-train with --backend lightgbm to use an available backend."
+        )
     else:
         raise ValueError(f"Unknown backend_name={backend_name!r} in {bundle_path}")
 

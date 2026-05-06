@@ -1,197 +1,342 @@
-"""Danger-class gate classifier for HeatShield AI forecast v3.
+"""Danger-tier gate classifier for HeatShield AI forecast v3.
 
-Trains a class-weighted LightGBM binary classifier to detect Danger-class
-heat events (heat index ≥ danger_thresh °C). Used by lgbm_backend.py to
-route samples through a Danger-conditional regressor when proba > threshold.
+Three tiers are used across training/inference:
+  0 = safe    (HI < 38C)
+  1 = warning (38C <= HI < 42C)
+  2 = danger  (HI >= 42C)
 
-Why a separate gate? The two-head (T, RH) regressor optimises MSE, which
-de-emphasises the rare tail. The gate classifier directly optimises for
-Danger detection and can be tuned independently.
+Two backends available:
+  "lightgbm": multiclass LightGBM classifier
+  "brf": BalancedRandomForestClassifier (imbalanced-learn)
 """
 from __future__ import annotations
 
 import json
+import logging
+import os
+import sys
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 
+logger = logging.getLogger(__name__)
+
+
+def _lgbm_device() -> str:
+    """Return best LightGBM device respecting runtime env overrides."""
+    env = os.getenv("LGBM_DEVICE", "").lower()
+    if env:
+        return env
+    if os.getenv("HEATSHIELD_FORCE_CPU") == "1":
+        return "cpu"
+    mod = sys.modules.get("app.ml.forecast.backends.lgbm_backend")
+    if mod is None:
+        import importlib
+        mod = importlib.import_module("app.ml.forecast.backends.lgbm_backend")
+    detect = getattr(mod, "_detect_device", None)
+    if detect is not None:
+        return detect()
+    return getattr(mod, "_DEVICE_TYPE", "cpu")
+
 
 class DangerGate:
-    """Binary gate: P(heat_index >= danger_thresh) for a given forecast horizon.
+    """Three-class danger gate with warning/danger thresholds."""
 
-    Attributes
-    ----------
-    threshold : float
-        Decision boundary for proba → "Danger" (swept on validation F1).
-    danger_thresh : float
-        HI threshold defining the positive class (default 40°C — slightly
-        below the 42°C Danger boundary to give the classifier more positives).
-    """
+    def __init__(self, gate_backend: Literal["lightgbm", "brf"] = "lightgbm") -> None:
+        self.warning_floor: float = 38.0
+        self.danger_floor: float = 42.0
+        self.warning_threshold: float = 0.30
+        self.danger_threshold: float = 0.35
+        self.gate_backend: str = gate_backend
+        self._clf = None
+        self._is_legacy_binary: bool = False
 
-    def __init__(self) -> None:
-        self.threshold: float = 0.35
-        self.danger_thresh: float = 40.0
-        self._clf = None  # lgb.Booster
+    @property
+    def threshold(self) -> float:
+        """Backward-compat alias used by older callers."""
+        return self.danger_threshold
 
-    # ------------------------------------------------------------------
-    # Training
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _to_tier(y_hi: pd.Series | np.ndarray, warning_floor: float, danger_floor: float) -> np.ndarray:
+        y_arr = np.asarray(y_hi, dtype=float)
+        return np.where(y_arr >= danger_floor, 2, np.where(y_arr >= warning_floor, 1, 0)).astype(int)
+
+    @staticmethod
+    def _proba_3class_from_binary(danger_proba: np.ndarray) -> np.ndarray:
+        danger_proba = np.clip(np.asarray(danger_proba, dtype=float), 0.0, 1.0)
+        warning_proba = 0.5 * danger_proba
+        safe_proba = np.clip(1.0 - warning_proba - danger_proba, 0.0, 1.0)
+        proba = np.column_stack([safe_proba, warning_proba, danger_proba])
+        denom = np.clip(proba.sum(axis=1, keepdims=True), 1e-12, None)
+        return proba / denom
 
     def fit(
         self,
         X: pd.DataFrame,
         y_hi: pd.Series,
         *,
-        danger_thresh: float = 40.0,
+        warning_floor: float = 38.0,
+        danger_floor: float = 42.0,
         val_X: pd.DataFrame | None = None,
         val_y_hi: pd.Series | None = None,
         n_estimators: int = 500,
         random_state: int = 42,
+        gate_backend: str | None = None,
     ) -> "DangerGate":
-        """Train the binary gate classifier.
+        if gate_backend is not None:
+            self.gate_backend = gate_backend
+        self.warning_floor = warning_floor
+        self.danger_floor = danger_floor
 
-        Parameters
-        ----------
-        X, y_hi : training features and heat-index target series.
-        danger_thresh : HI boundary for positive class.
-        val_X, val_y_hi : held-out validation set for threshold sweep.
-        """
+        y_tier = self._to_tier(y_hi, warning_floor, danger_floor)
+        if self.gate_backend == "brf":
+            self._fit_brf(X, y_tier, n_estimators=n_estimators, random_state=random_state)
+        else:
+            try:
+                self._fit_lgbm(
+                    X,
+                    y_tier,
+                    val_X=val_X,
+                    val_y_hi=val_y_hi,
+                    n_estimators=n_estimators,
+                    random_state=random_state,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "DangerGate LightGBM training failed (%s). Falling back to BRF backend.",
+                    exc,
+                )
+                self.gate_backend = "brf"
+                self._fit_brf(X, y_tier, n_estimators=n_estimators, random_state=random_state)
+
+        if val_X is not None and val_y_hi is not None:
+            val_tier = self._to_tier(val_y_hi, warning_floor, danger_floor)
+            self._sweep_thresholds(val_X, val_tier)
+        return self
+
+    def _fit_lgbm(
+        self,
+        X: pd.DataFrame,
+        y_tier: np.ndarray,
+        *,
+        val_X: pd.DataFrame | None,
+        val_y_hi: pd.Series | None,
+        n_estimators: int,
+        random_state: int,
+    ) -> None:
         try:
             import lightgbm as lgb
         except ImportError as exc:
             raise ImportError("pip install lightgbm") from exc
 
-        self.danger_thresh = danger_thresh
-        y_bin = (y_hi >= danger_thresh).astype(int)
-
-        n_pos = int(y_bin.sum())
-        n_neg = int(len(y_bin) - n_pos)
-        scale_pos = max(1.0, n_neg / max(n_pos, 1))
+        device = _lgbm_device()
+        class_counts = np.bincount(y_tier, minlength=3)
+        class_weight = {
+            cls: float(len(y_tier)) / max(int(count), 1)
+            for cls, count in enumerate(class_counts)
+        }
+        sample_weight = np.array([class_weight[int(cls)] for cls in y_tier], dtype=float)
 
         params = {
-            "objective": "binary",
-            "metric": "binary_logloss",
-            "scale_pos_weight": scale_pos,
+            "objective": "multiclass",
+            "num_class": 3,
+            "metric": "multi_logloss",
             "num_leaves": 63,
             "learning_rate": 0.05,
-            "n_estimators": n_estimators,
             "subsample": 0.8,
             "colsample_bytree": 0.8,
-            "random_state": random_state,
+            "seed": random_state,
             "verbose": -1,
+            "device_type": device,
+            **({"n_jobs": -1} if device == "cpu" else {}),
         }
 
-        dtrain = lgb.Dataset(X, label=y_bin)
-
-        callbacks = [lgb.early_stopping(50, verbose=False), lgb.log_evaluation(-1)]
-        eval_sets = []
-
+        dtrain = lgb.Dataset(X, label=y_tier, weight=sample_weight)
+        valid_sets = None
+        callbacks = [lgb.log_evaluation(-1)]
         if val_X is not None and val_y_hi is not None:
-            val_bin = (val_y_hi >= danger_thresh).astype(int)
-            dval = lgb.Dataset(val_X, label=val_bin, reference=dtrain)
-            eval_sets = [dval]
+            y_val_tier = self._to_tier(val_y_hi, self.warning_floor, self.danger_floor)
+            dval = lgb.Dataset(val_X, label=y_val_tier, reference=dtrain)
+            valid_sets = [dval]
+            callbacks = [lgb.early_stopping(50, verbose=False), lgb.log_evaluation(-1)]
 
         self._clf = lgb.train(
             params,
             dtrain,
-            valid_sets=eval_sets if eval_sets else None,
-            callbacks=callbacks if eval_sets else [lgb.log_evaluation(-1)],
+            num_boost_round=n_estimators,
+            valid_sets=valid_sets,
+            callbacks=callbacks,
+        )
+        self._is_legacy_binary = False
+
+    def _fit_brf(
+        self,
+        X: pd.DataFrame,
+        y_tier: np.ndarray,
+        *,
+        n_estimators: int,
+        random_state: int,
+    ) -> None:
+        try:
+            from imblearn.ensemble import BalancedRandomForestClassifier
+        except ImportError as exc:
+            raise ImportError("pip install imbalanced-learn>=0.13") from exc
+
+        self._clf = BalancedRandomForestClassifier(
+            n_estimators=n_estimators,
+            max_depth=None,
+            min_samples_leaf=8,
+            sampling_strategy="all",
+            replacement=True,
+            bootstrap=True,
+            random_state=random_state,
+            n_jobs=1,
+        )
+        self._clf.fit(X, y_tier)
+        self._is_legacy_binary = False
+
+    def _sweep_thresholds(self, X: pd.DataFrame, y_tier: np.ndarray) -> None:
+        proba = self.predict_tier_proba(X)
+        warn_true = (y_tier >= 1).astype(int)
+        danger_true = (y_tier == 2).astype(int)
+
+        self.warning_threshold = self._best_threshold(
+            proba[:, 1] + proba[:, 2],
+            warn_true,
+            precision_min=0.50,
+            recall_min=0.55,
+            default=0.30,
+        )
+        self.danger_threshold = self._best_threshold(
+            proba[:, 2],
+            danger_true,
+            precision_min=0.55,
+            recall_min=0.40,
+            default=0.35,
         )
 
-        # Sweep threshold on validation set if provided
-        if val_X is not None and val_y_hi is not None:
-            self._sweep_threshold(val_X, val_y_hi >= danger_thresh)
-
-        return self
-
-    def _sweep_threshold(
-        self, X: pd.DataFrame, y_bin: pd.Series
-    ) -> None:
-        """Find the threshold that maximises recall subject to a precision constraint."""
-        PRECISION_MIN = 0.55
-        RECALL_MIN = 0.40
-
-        probas = self.predict_proba(X)
-
-        # First pass: find thresholds that meet both constraints
-        valid_thresholds = []
-        for t in np.arange(0.10, 0.80, 0.05):
-            preds = (probas >= t).astype(int)
-            tp = int(((preds == 1) & (y_bin == 1)).sum())
-            fp = int(((preds == 1) & (y_bin == 0)).sum())
-            fn = int(((preds == 0) & (y_bin == 1)).sum())
+    @staticmethod
+    def _best_threshold(
+        score: np.ndarray,
+        y_true: np.ndarray,
+        *,
+        precision_min: float,
+        recall_min: float,
+        default: float,
+    ) -> float:
+        candidates: list[tuple[float, float, float]] = []
+        for t in np.arange(0.10, 0.85, 0.05):
+            pred = (score >= t).astype(int)
+            tp = int(((pred == 1) & (y_true == 1)).sum())
+            fp = int(((pred == 1) & (y_true == 0)).sum())
+            fn = int(((pred == 0) & (y_true == 1)).sum())
             prec = tp / max(tp + fp, 1)
             rec = tp / max(tp + fn, 1)
-            if prec >= PRECISION_MIN and rec >= RECALL_MIN:
-                valid_thresholds.append((t, rec, prec))
+            if prec >= precision_min and rec >= recall_min:
+                candidates.append((float(t), rec, prec))
 
-        if valid_thresholds:
-            # Pick the threshold with highest recall (break ties by highest precision)
-            best = max(valid_thresholds, key=lambda x: (x[1], x[2]))
-            self.threshold = best[0]
-        else:
-            # Fallback: no threshold meets both constraints — maximise recall
-            # with precision >= 0.40
-            fallback = []
-            for t in np.arange(0.10, 0.80, 0.05):
-                preds = (probas >= t).astype(int)
-                tp = int(((preds == 1) & (y_bin == 1)).sum())
-                fp = int(((preds == 1) & (y_bin == 0)).sum())
-                fn = int(((preds == 0) & (y_bin == 1)).sum())
-                prec = tp / max(tp + fp, 1)
-                rec = tp / max(tp + fn, 1)
-                if prec >= 0.40:
-                    fallback.append((t, rec))
-            if fallback:
-                self.threshold = max(fallback, key=lambda x: x[1])[0]
-            else:
-                self.threshold = 0.35  # last resort default
+        if candidates:
+            return max(candidates, key=lambda x: (x[1], x[2]))[0]
 
-    # ------------------------------------------------------------------
-    # Inference
-    # ------------------------------------------------------------------
+        fallback: list[tuple[float, float]] = []
+        for t in np.arange(0.10, 0.85, 0.05):
+            pred = (score >= t).astype(int)
+            tp = int(((pred == 1) & (y_true == 1)).sum())
+            fp = int(((pred == 1) & (y_true == 0)).sum())
+            fn = int(((pred == 0) & (y_true == 1)).sum())
+            prec = tp / max(tp + fp, 1)
+            rec = tp / max(tp + fn, 1)
+            if prec >= 0.40:
+                fallback.append((float(t), rec))
+        return max(fallback, key=lambda x: x[1])[0] if fallback else default
 
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Return P(Danger) for each row in X, shape (N,)."""
+    def predict_tier_proba(self, X: pd.DataFrame) -> np.ndarray:
+        """Return class probabilities ordered as [safe, warning, danger]."""
         if self._clf is None:
             raise RuntimeError("DangerGate not fitted — call .fit() first")
-        return self._clf.predict(X)
+
+        if self.gate_backend == "brf":
+            proba = self._clf.predict_proba(X)
+            classes = list(getattr(self._clf, "classes_", [0, 1, 2]))
+            out = np.zeros((len(X), 3), dtype=float)
+            for idx, cls in enumerate(classes):
+                if 0 <= int(cls) <= 2:
+                    out[:, int(cls)] = proba[:, idx]
+            row_sum = np.clip(out.sum(axis=1, keepdims=True), 1e-12, None)
+            return out / row_sum
+
+        raw = self._clf.predict(X)
+        raw_arr = np.asarray(raw)
+        if raw_arr.ndim == 1:
+            self._is_legacy_binary = True
+            return self._proba_3class_from_binary(raw_arr)
+        self._is_legacy_binary = False
+        if raw_arr.shape[1] != 3:
+            raise ValueError(f"Unexpected LightGBM gate output shape: {raw_arr.shape}")
+        row_sum = np.clip(raw_arr.sum(axis=1, keepdims=True), 1e-12, None)
+        return raw_arr / row_sum
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        """Backward-compatible danger probability P(tier=2)."""
+        return self.predict_tier_proba(X)[:, 2]
+
+    def predict_tier(self, X: pd.DataFrame) -> np.ndarray:
+        """Predict discrete tier using tuned warning/danger thresholds."""
+        proba = self.predict_tier_proba(X)
+        warn_score = proba[:, 1] + proba[:, 2]
+        danger_score = proba[:, 2]
+        tier = np.zeros(len(X), dtype=int)
+        tier[warn_score >= self.warning_threshold] = 1
+        tier[danger_score >= self.danger_threshold] = 2
+        return tier
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        """Return binary Danger prediction using self.threshold."""
-        return (self.predict_proba(X) >= self.threshold).astype(int)
-
-    # ------------------------------------------------------------------
-    # Serialisation
-    # ------------------------------------------------------------------
+        """Backward-compatible binary danger prediction."""
+        return (self.predict_tier(X) == 2).astype(int)
 
     def save(self, path: Path) -> None:
-        """Save to a directory: gate_clf.txt (LightGBM) + gate_meta.json."""
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         if self._clf is not None:
-            self._clf.save_model(str(path / "gate_clf.txt"))
+            if self.gate_backend == "brf":
+                import joblib
+                joblib.dump(self._clf, str(path / "gate_clf.joblib"))
+            else:
+                self._clf.save_model(str(path / "gate_clf.txt"))
         meta = {
-            "threshold": self.threshold,
-            "danger_thresh": self.danger_thresh,
+            "warning_floor": self.warning_floor,
+            "danger_floor": self.danger_floor,
+            "warning_threshold": self.warning_threshold,
+            "danger_threshold": self.danger_threshold,
+            "gate_backend": self.gate_backend,
+            "version": "v3-tier",
         }
         (path / "gate_meta.json").write_text(json.dumps(meta, indent=2))
 
     @classmethod
     def load(cls, path: Path) -> "DangerGate":
-        """Load from a previously saved directory."""
-        try:
-            import lightgbm as lgb
-        except ImportError as exc:
-            raise ImportError("pip install lightgbm") from exc
-
         path = Path(path)
-        obj = cls()
         meta = json.loads((path / "gate_meta.json").read_text())
-        obj.threshold = float(meta["threshold"])
-        obj.danger_thresh = float(meta["danger_thresh"])
-        clf_path = path / "gate_clf.txt"
-        if clf_path.exists():
-            obj._clf = lgb.Booster(model_file=str(clf_path))
+        gate_backend = meta.get("gate_backend", "lightgbm")
+        obj = cls(gate_backend=gate_backend)
+        obj.warning_floor = float(meta.get("warning_floor", 38.0))
+        obj.danger_floor = float(meta.get("danger_floor", meta.get("danger_thresh", 42.0)))
+        obj.warning_threshold = float(meta.get("warning_threshold", meta.get("threshold", 0.30)))
+        obj.danger_threshold = float(meta.get("danger_threshold", meta.get("threshold", 0.35)))
+
+        if gate_backend == "brf":
+            clf_path = path / "gate_clf.joblib"
+            if clf_path.exists():
+                import joblib
+                obj._clf = joblib.load(str(clf_path))
+        else:
+            try:
+                import lightgbm as lgb
+            except ImportError as exc:
+                raise ImportError("pip install lightgbm") from exc
+            clf_path = path / "gate_clf.txt"
+            if clf_path.exists():
+                obj._clf = lgb.Booster(model_file=str(clf_path))
         return obj

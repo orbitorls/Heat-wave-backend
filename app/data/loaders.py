@@ -49,6 +49,7 @@ def read_observations(
     if not frames:
         return pd.DataFrame()
 
+    frames = [f.dropna(axis=1, how="all") for f in frames]
     df = pd.concat(frames, ignore_index=True)
     if "ts_utc" in df.columns:
         df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True)

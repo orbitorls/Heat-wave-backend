@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI
 from app.api import heat_index, events, risk, whatif, action_card, forecast
@@ -24,11 +26,11 @@ app.include_router(forecast.router, prefix="/forecast", tags=["Forecast"])
 
 @app.on_event("startup")
 async def _prewarm_v3_forecasters() -> None:
-    """Pre-load v3 h=24 forecasters at startup to avoid cold-start latency."""
+    """Pre-load v3 h=24 forecasters in parallel at startup to avoid cold-start latency."""
     from app.ml import registry
     from app.data.stations import STATIONS
 
-    for sid in STATIONS:
+    def _load_one(sid: str) -> None:
         try:
             registry.load_latest_v3(sid, 24)
             logger.info("Pre-warmed v3 forecaster: station=%s h=24", sid)
@@ -36,6 +38,10 @@ async def _prewarm_v3_forecasters() -> None:
             pass  # v3 not trained yet — v2 fallback will handle it
         except Exception as exc:
             logger.warning("Could not pre-warm v3 for %s: %s", sid, exc)
+
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor(max_workers=len(STATIONS)) as pool:
+        await asyncio.gather(*[loop.run_in_executor(pool, _load_one, sid) for sid in STATIONS])
 
 
 @app.get("/health")

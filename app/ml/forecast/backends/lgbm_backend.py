@@ -14,6 +14,7 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import TimeSeriesSplit
 
 from app.ml.forecast.base import BaseForecaster, PredictionBundle
 from app.ml.forecast.conformal import EnbPICalibrator, MondianCQRCalibrator
@@ -25,26 +26,85 @@ logger = logging.getLogger(__name__)
 _QUANTILES = [0.05, 0.50, 0.95, 0.97]
 _TARGETS = ["temp_c", "rh"]
 _SEEDS = [42, 123, 7]
+_CV_SPLITS = 2
+_CV_GAP_HOURS = 72
+_LGBM_DEVICE_SUPPORT: dict[str, bool] = {}
 
-# Detect GPU availability at import time (OpenCL backend, standard pip wheel)
-# Set LGBM_DEVICE=cpu in environment to force CPU mode (use when OpenCL causes crashes)
-def _detect_device() -> str:
-    import os
-    if os.environ.get("LGBM_DEVICE", "").lower() == "cpu":
-        logger.info("LightGBM forced to CPU (LGBM_DEVICE=cpu)")
-        return "cpu"
+# Detect best LightGBM device.
+# Hardware probe runs once at import; env overrides are re-read on every call.
+# Priority: LGBM_DEVICE env > HEATSHIELD_FORCE_CPU env > CUDA > OpenCL GPU > CPU
+
+def _probe_lgbm_hardware() -> str:
+    """Run the slow lgb.train probes once to discover hardware capabilities."""
+    import lightgbm as lgb
+    # Each probe gets a fresh Dataset — reusing one Dataset across probes risks
+    # hitting inconsistent internal state after a failed lgb.train call.
     try:
-        import lightgbm as lgb
-        import numpy as np
-        d = lgb.Dataset(np.zeros((10, 2)), np.zeros(10))
+        lgb.train({"objective": "regression", "device_type": "cuda", "verbose": -1,
+                   "num_leaves": 4},
+                  lgb.Dataset(np.zeros((4, 2)), np.zeros(4)),
+                  num_boost_round=1)
+        logger.info("LightGBM CUDA detected — training will use CUDA")
+        _LGBM_DEVICE_SUPPORT["cuda"] = True
+        _LGBM_DEVICE_SUPPORT["gpu"] = True  # if CUDA works, OpenCL certainly does
+        return "cuda"
+    except Exception:
+        _LGBM_DEVICE_SUPPORT["cuda"] = False
+    try:
         lgb.train({"objective": "regression", "device_type": "gpu", "verbose": -1,
-                   "num_leaves": 4}, d, num_boost_round=1)
+                   "num_leaves": 4},
+                  lgb.Dataset(np.zeros((4, 2)), np.zeros(4)),
+                  num_boost_round=1)
         logger.info("LightGBM GPU (OpenCL) detected — training will use GPU")
+        _LGBM_DEVICE_SUPPORT["gpu"] = True
         return "gpu"
     except Exception:
+        _LGBM_DEVICE_SUPPORT["gpu"] = False
         return "cpu"
 
-_DEVICE_TYPE = _detect_device()
+
+def _supports_lgbm_device(device_type: str) -> bool:
+    """Return whether a specific LightGBM device type is usable."""
+    key = device_type.lower().strip()
+    if key in _LGBM_DEVICE_SUPPORT:
+        return _LGBM_DEVICE_SUPPORT[key]
+    try:
+        import lightgbm as lgb
+        lgb.train(
+            {"objective": "regression", "device_type": key, "verbose": -1, "num_leaves": 4},
+            lgb.Dataset(np.zeros((8, 2)), np.zeros(8)),
+            num_boost_round=1,
+        )
+        _LGBM_DEVICE_SUPPORT[key] = True
+    except Exception:
+        _LGBM_DEVICE_SUPPORT[key] = False
+    return _LGBM_DEVICE_SUPPORT[key]
+
+
+_HW_DEVICE: str = _probe_lgbm_hardware()
+
+
+def _detect_device() -> str:
+    """Return best LightGBM device, re-reading env vars on every call.
+
+    Hardware capability is probed once at import (_HW_DEVICE); env overrides
+    (LGBM_DEVICE, HEATSHIELD_FORCE_CPU) are re-read each call so test fixtures
+    and shell changes made after import are respected.
+    """
+    import os
+    env = os.environ.get("LGBM_DEVICE", "").lower()
+    if env:
+        if _supports_lgbm_device(env):
+            logger.info("LightGBM device forced via LGBM_DEVICE=%s", env)
+            return env
+        logger.warning("LGBM_DEVICE=%s is not supported by this LightGBM build. Falling back to auto-detect.", env)
+    if os.environ.get("HEATSHIELD_FORCE_CPU") == "1":
+        logger.info("LightGBM forced to CPU (HEATSHIELD_FORCE_CPU=1)")
+        return "cpu"
+    return _HW_DEVICE
+
+
+_DEVICE_TYPE = _detect_device()  # import-time snapshot; kept for external references
 
 # Default LightGBM params (overridden by Optuna)
 _DEFAULT_PARAMS = {
@@ -110,15 +170,63 @@ def _compute_hi_array(temp_c: np.ndarray, rh: np.ndarray) -> np.ndarray:
     return np.where(use_simple, simple_hi_c, rothfusz_hi_c)
 
 
+def _compute_dense_weights(
+    y_hi: np.ndarray,
+    *,
+    alpha: float = 0.8,
+    min_weight: float = 0.25,
+    max_weight: float = 6.0,
+) -> np.ndarray:
+    """Compute density-based sample weights with clipping.
+
+    Lower-density (rarer) samples get higher weights. Weights are normalized
+    to mean 1 and clipped to avoid gradient explosions.
+    """
+    y = np.asarray(y_hi, dtype=float)
+    if len(y) < 20 or np.nanstd(y) < 1e-6:
+        return np.ones(len(y), dtype=float)
+    try:
+        from scipy.stats import gaussian_kde
+        kde = gaussian_kde(y)
+        density = np.clip(kde(y), 1e-9, None)
+        weight = 1.0 / (density ** float(alpha))
+        weight = weight / max(float(np.mean(weight)), 1e-9)
+        return np.clip(weight, min_weight, max_weight)
+    except Exception:
+        return np.ones(len(y), dtype=float)
+
+
+def _expanding_window_splits(
+    n_rows: int,
+    *,
+    gap: int,
+    n_splits: int = _CV_SPLITS,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Return expanding-window folds with purge gap."""
+    if n_rows <= gap + 48:
+        return []
+    # Ensure fold count remains valid for short series.
+    split_count = max(2, min(n_splits, (n_rows // max(gap + 24, 48))))
+    splitter = TimeSeriesSplit(n_splits=split_count, gap=gap)
+    return list(splitter.split(np.arange(n_rows)))
+
+
 class LGBMForecaster:
     """Two-head LightGBM quantile forecaster satisfying BaseForecaster Protocol."""
 
     backend_name: str = "lightgbm_quantile"
-    target_kind: Literal["hi", "th"] = "th"
+    target_kind: Literal["hi", "th"]
 
-    def __init__(self, n_trials: int = 50, random_state: int = 42) -> None:
+    def __init__(
+        self,
+        n_trials: int = 50,
+        random_state: int = 42,
+        gate_backend: str = "lightgbm",
+    ) -> None:
         self.n_trials = n_trials
         self.random_state = random_state
+        self._gate_backend = gate_backend
+        self.target_kind: str = "th"
         self.feature_list: list[str] = []
         self._station_id: str = ""
         self._horizon_h: int = 24
@@ -178,21 +286,25 @@ class LGBMForecaster:
         logger.info("LGBMForecaster fit: station=%s h=%d rows=%d (train=%d val=%d test=%d)",
                     station_id, horizon_h, n, n_train, n_val, len(X_test))
 
-        # Sample weights (on training HI, derived from T+RH)
-        from app.ml.forecast.train import _make_sample_weight
-        y_hi_train = _compute_hi_array(y_train["temp_c"].values, y_train["rh"].values)
-        weights = _make_sample_weight(pd.Series(y_hi_train))
+        # Expanding-window CV tuning uses train+val only. Holdout test remains untouched.
+        X_tune = pd.concat([X_train, X_val], ignore_index=True)
+        y_temp_tune = pd.concat([y_train["temp_c"], y_val["temp_c"]], ignore_index=True)
+        y_rh_tune = pd.concat([y_train["rh"], y_val["rh"]], ignore_index=True)
+        y_hi_tune = _compute_hi_array(y_temp_tune.values, y_rh_tune.values)
 
-        # Change 5: tail sample weight boost — _make_sample_weight gives 5x for >38°C and
-        # 9x for >42°C, but nothing special at exactly >=40°C; ensure minimum 2.0 there.
-        tail_mask = y_hi_train >= 40.0
-        weights = weights.astype(float).copy()
-        weights[tail_mask] = np.maximum(weights[tail_mask], 2.0)
-
-        # Optuna hyperparameter search (use q50 of temp_c as proxy objective)
-        self._best_params = self._tune(X_train, y_train["temp_c"], weights, X_val, y_val["temp_c"])
+        # Optuna hyperparameter search (q50 temp proxy with CV MAE)
+        self._best_params = self._tune(
+            X_tune,
+            y_temp_tune,
+            y_hi_for_weights=y_hi_tune,
+            horizon_h=horizon_h,
+        )
+        dense_alpha = float(self._best_params.pop("dense_alpha", 0.8))
+        self._metadata["dense_alpha"] = dense_alpha
 
         # Train boosters: len(_QUANTILES) quantiles × 2 targets, multi-seed averaged
+        y_hi_train = _compute_hi_array(y_train["temp_c"].values, y_train["rh"].values)
+        weights = _compute_dense_weights(y_hi_train, alpha=dense_alpha)
         for t_idx, target in enumerate(_TARGETS):
             for q_idx, alpha in enumerate(_QUANTILES):
                 seed_boosters = []
@@ -200,6 +312,7 @@ class LGBMForecaster:
                     params = {
                         **_DEFAULT_PARAMS,
                         **self._best_params,
+                        "device_type": _detect_device(),  # re-read env vars each fit
                         "alpha": alpha,
                         "seed": seed,
                     }
@@ -219,36 +332,42 @@ class LGBMForecaster:
                 self._boosters[target][q_idx] = seed_boosters
                 logger.debug("Trained booster: target=%s q=%.2f seeds=%d", target, alpha, len(_SEEDS))
 
-        # Mondrian CQR calibration on validation set (stratified by station × hour bin)
-        bundle_val = self._predict_bundle(X_val)
-        y_hi_val = _compute_hi_array(y_val["temp_c"].values, y_val["rh"].values)
-        station_ids_val = np.full(len(X_val), station_id)
-        angles_val = np.arctan2(X_val["local_hour_sin"].values, X_val["local_hour_cos"].values)
-        local_hours_val = np.round(angles_val * 24 / (2 * np.pi)).astype(int) % 24
-        self._calibrator = MondianCQRCalibrator()
-        self._calibrator.fit(
-            y_hi_val, bundle_val.hi_lower, bundle_val.hi_upper,
-            station_ids=station_ids_val,
-            local_hours=local_hours_val,
-            alpha=0.10,
-        )
-
-        # Compute median PI width for low_confidence threshold
-        lo_cal, hi_cal = self._calibrate(X_val, bundle_val.hi_lower, bundle_val.hi_upper)
-        self._metadata["median_pi_width"] = float(np.median(hi_cal - lo_cal))
-
         # Danger gate (train on train+val combined)
         X_tv = pd.concat([X_train, X_val])
         y_hi_tv = _compute_hi_array(
             pd.concat([y_train["temp_c"], y_val["temp_c"]]).values,
             pd.concat([y_train["rh"], y_val["rh"]]).values,
         )
-        self._gate = DangerGate()
+        y_hi_val = _compute_hi_array(y_val["temp_c"].values, y_val["rh"].values)
+        self._gate = DangerGate(gate_backend=self._gate_backend)
         self._gate.fit(
             X_tv, pd.Series(y_hi_tv, index=X_tv.index),
             val_X=X_val,
             val_y_hi=pd.Series(y_hi_val, index=X_val.index),
         )
+        self._metadata["gate_warning_threshold"] = float(self._gate.warning_threshold)
+        self._metadata["gate_danger_threshold"] = float(self._gate.danger_threshold)
+
+        # Mondrian CQR calibration on validation set (station × hour × danger-tier)
+        bundle_val = self._predict_bundle(X_val)
+        station_ids_val = np.full(len(X_val), station_id)
+        angles_val = np.arctan2(X_val["local_hour_sin"].values, X_val["local_hour_cos"].values)
+        local_hours_val = np.round(angles_val * 24 / (2 * np.pi)).astype(int) % 24
+        danger_tier_val = self._gate.predict_tier(X_val) if self._gate else np.zeros(len(X_val), dtype=int)
+        self._calibrator = MondianCQRCalibrator()
+        self._calibrator.fit(
+            y_hi_val,
+            bundle_val.hi_lower,
+            bundle_val.hi_upper,
+            station_ids=station_ids_val,
+            local_hours=local_hours_val,
+            danger_tiers=danger_tier_val,
+            alpha=0.10,
+        )
+
+        # Compute median PI width for low_confidence threshold
+        lo_cal, hi_cal = self._calibrate(X_val, bundle_val.hi_lower, bundle_val.hi_upper)
+        self._metadata["median_pi_width"] = float(np.median(hi_cal - lo_cal))
 
         # Test set metrics
         if len(X_test) > 0:
@@ -274,22 +393,24 @@ class LGBMForecaster:
 
     def _tune(
         self,
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-        weights: np.ndarray,
-        X_val: pd.DataFrame,
-        y_val: pd.Series,
+        X_tune: pd.DataFrame,
+        y_target: pd.Series,
+        *,
+        y_hi_for_weights: np.ndarray,
+        horizon_h: int,
     ) -> dict:
-        """Optuna search over LightGBM hyperparameters (quantile q50, temp_c proxy)."""
+        """Optuna search over LightGBM hyperparameters with expanding-window CV."""
         import lightgbm as lgb
         import optuna
 
         def objective(trial: optuna.Trial) -> float:
+            dense_alpha = trial.suggest_float("dense_alpha", 0.3, 1.5)
             params = {
                 **_DEFAULT_PARAMS,
+                "device_type": _detect_device(),  # re-read env vars each trial
                 "alpha": 0.50,
-                "num_leaves": trial.suggest_int("num_leaves", 20, 200),
-                "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
+                "num_leaves": trial.suggest_int("num_leaves", 31, 127),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.05, log=True),
                 "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
                 "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
@@ -297,31 +418,67 @@ class LGBMForecaster:
                 "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 5.0),
                 "seed": self.random_state,
             }
-            dtrain = lgb.Dataset(X_train, label=y_train, weight=weights)
-            dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
-            booster = lgb.train(
-                params, dtrain, num_boost_round=1000,
-                valid_sets=[dval],
-                callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(-1)],
+            folds = _expanding_window_splits(
+                len(X_tune),
+                gap=max(horizon_h, _CV_GAP_HOURS),
+                n_splits=_CV_SPLITS,
             )
-            return float(np.mean(np.abs(booster.predict(X_val) - y_val.values)))
+            if not folds:
+                return float("inf")
+
+            fold_mae: list[float] = []
+            for k, (tr_idx, va_idx) in enumerate(folds):
+                X_train = X_tune.iloc[tr_idx]
+                y_train = y_target.iloc[tr_idx]
+                X_val = X_tune.iloc[va_idx]
+                y_val = y_target.iloc[va_idx]
+                weights = _compute_dense_weights(y_hi_for_weights[tr_idx], alpha=dense_alpha)
+                dtrain = lgb.Dataset(X_train, label=y_train, weight=weights)
+                dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
+                booster = lgb.train(
+                    params,
+                    dtrain,
+                    num_boost_round=1000,
+                    valid_sets=[dval],
+                    callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(-1)],
+                )
+                preds = booster.predict(X_val)
+                fold_mae.append(float(np.mean(np.abs(preds - y_val.values))))
+                trial.report(float(np.mean(fold_mae)), step=k)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+
+            return float(np.mean(fold_mae))
 
         # Change 6: persistent Optuna study with warm-start
+        # station_id is included so parallel --workers runs don't share TPE state
+        import hashlib
+        _feat_sig = hashlib.sha256(
+            ("|".join(sorted(X_tune.columns)) + f"|lags=[1,3,6,12,24]|roll=[3,6,24]").encode()
+        ).hexdigest()[:8]
         _OPTUNA_STORAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        study_name = f"lgbm_{self.target_kind}_h{self._horizon_h}"
+        study_name = f"lgbm_{self._station_id}_{self.target_kind}_h{self._horizon_h}_{_feat_sig}"
         try:
             _storage = optuna.storages.RDBStorage(f"sqlite:///{_OPTUNA_STORAGE_PATH}")
         except Exception:
             _storage = None
 
-        study = optuna.create_study(
-            study_name=study_name,
-            direction="minimize",
-            sampler=optuna.samplers.TPESampler(seed=self.random_state),
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0),
-            storage=_storage,
-            load_if_exists=True,
-        )
+        try:
+            study = optuna.create_study(
+                study_name=study_name,
+                direction="minimize",
+                sampler=optuna.samplers.TPESampler(seed=self.random_state),
+                pruner=optuna.pruners.HyperbandPruner(min_resource=10, max_resource=1000, reduction_factor=3),
+                storage=_storage,
+                load_if_exists=True,
+            )
+        except Exception as exc:
+            logger.warning("Optuna persistent storage unavailable (%s). Falling back to in-memory study.", exc)
+            study = optuna.create_study(
+                direction="minimize",
+                sampler=optuna.samplers.TPESampler(seed=self.random_state),
+                pruner=optuna.pruners.HyperbandPruner(min_resource=10, max_resource=1000, reduction_factor=3),
+            )
         study.optimize(objective, n_trials=self.n_trials, show_progress_bar=False)
         logger.info("Optuna best: MAE=%.4f params=%s", study.best_value, study.best_params)
         self._metadata["n_trials_completed"] = sum(t.state.name == "COMPLETE" for t in study.trials)
@@ -342,7 +499,14 @@ class LGBMForecaster:
             station_ids = np.full(len(X), self._station_id)
             angles = np.arctan2(X["local_hour_sin"].values, X["local_hour_cos"].values)
             local_hours = np.round(angles * 24 / (2 * np.pi)).astype(int) % 24
-            return self._calibrator.adjust(lo, hi, station_ids=station_ids, local_hours=local_hours)
+            danger_tier = self._gate.predict_tier(X) if self._gate else np.zeros(len(X), dtype=int)
+            return self._calibrator.adjust(
+                lo,
+                hi,
+                station_ids=station_ids,
+                local_hours=local_hours,
+                danger_tiers=danger_tier,
+            )
         return self._calibrator.adjust(lo, hi)
 
     def _predict_th(self, X: pd.DataFrame) -> dict[str, np.ndarray]:
@@ -435,9 +599,8 @@ class LGBMForecaster:
     ) -> PredictionBundle:
         """Return calibrated PredictionBundle for rows in X.
 
-        DangerGate fires hi_mean escalation to 42.5°C when gate probability
-        exceeds its threshold. Mondrian CQR calibration widens intervals in
-        hot afternoon strata and tightens in cool regimes.
+        DangerGate predicts 3 tiers (safe/warning/danger). We apply tier-aware
+        escalation on hi_mean and keep calibrated intervals from Mondrian CQR.
         """
         X_aligned = self._align(X)
         raw = self._predict_bundle_raw(X_aligned)
@@ -446,18 +609,19 @@ class LGBMForecaster:
         hi_upper = raw["hi_upper"].copy()
         hi_q97 = raw["hi_q97"]
         danger_proba = raw["danger_proba"]
+        danger_tier = self._gate.predict_tier(X_aligned) if self._gate else np.zeros(len(X_aligned), dtype=int)
 
         # Mondrian CQR calibration
         hi_lower, hi_upper = self._calibrate(X_aligned, hi_lower, hi_upper)
 
-        # Gate override — soft escalation when Danger probability fires.
-        # Cap at 42.5°C (just above the alert boundary) instead of pushing to q97,
-        # which caused ~13°C over-predictions on non-extreme hot-season samples.
-        _DANGER_ALERT_THRESH = 42.5
-        if self._gate is not None and danger_proba is not None:
-            gate_mask = danger_proba >= self._gate.threshold
-            if gate_mask.any():
-                hi_mean[gate_mask] = np.maximum(hi_mean[gate_mask], _DANGER_ALERT_THRESH)
+        # Tier-aware gate override.
+        warning_mask = danger_tier == 1
+        danger_mask = danger_tier == 2
+        if warning_mask.any():
+            hi_mean[warning_mask] = np.maximum(hi_mean[warning_mask], 0.8 * hi_mean[warning_mask] + 0.2 * hi_q97[warning_mask])
+        if danger_mask.any():
+            hi_mean[danger_mask] = np.maximum(hi_mean[danger_mask], hi_q97[danger_mask])
+            hi_upper[danger_mask] = np.maximum(hi_upper[danger_mask], hi_q97[danger_mask])
 
         return PredictionBundle(
             hi_mean=hi_mean,
@@ -523,6 +687,7 @@ class LGBMForecaster:
         obj._best_params = bundle.get("best_params", {})
         obj._station_id = bundle.get("station_id", "")
         obj._horizon_h = bundle.get("horizon_h", 24)
+        obj.target_kind = bundle.get("target_kind", "th")
         obj._metadata = {k: v for k, v in bundle.items()
                          if k not in ("feature_list", "feature_medians", "best_params",
                                       "backend_name", "target_kind", "station_id", "horizon_h")}
@@ -558,9 +723,10 @@ class LGBMDirectHIForecaster:
     backend_name: str = "lightgbm_hi_quantile"
     target_kind: Literal["hi", "th"] = "hi"
 
-    def __init__(self, n_trials: int = 50, random_state: int = 42) -> None:
+    def __init__(self, n_trials: int = 50, random_state: int = 42, gate_backend: str = "lightgbm") -> None:
         self.n_trials = n_trials
         self.random_state = random_state
+        self._gate_backend = gate_backend  # accepted for API symmetry with LGBMForecaster; not used in fit
         self.feature_list: list[str] = []
         self._station_id: str = ""
         self._horizon_h: int = 24
@@ -618,6 +784,7 @@ class LGBMDirectHIForecaster:
                 params = {
                     **_DEFAULT_PARAMS,
                     **self._best_params,
+                    "device_type": _detect_device(),  # re-read env vars each fit
                     "alpha": alpha,
                     "seed": seed,
                 }
@@ -664,9 +831,10 @@ class LGBMDirectHIForecaster:
         def objective(trial: optuna.Trial) -> float:
             params = {
                 **_DEFAULT_PARAMS,
+                "device_type": _detect_device(),  # re-read env vars each trial
                 "alpha": 0.50,
-                "num_leaves": trial.suggest_int("num_leaves", 20, 200),
-                "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
+                "num_leaves": trial.suggest_int("num_leaves", 31, 127),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.05, log=True),
                 "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
                 "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
@@ -674,6 +842,17 @@ class LGBMDirectHIForecaster:
                 "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 5.0),
                 "seed": self.random_state,
             }
+
+            _should_prune = [False]
+
+            def _pruning_cb(env) -> None:
+                if not env.evaluation_result_list:
+                    return
+                val_loss = env.evaluation_result_list[0][2]
+                trial.report(float(val_loss), step=env.iteration)
+                if trial.should_prune():
+                    _should_prune[0] = True
+
             dtrain = lgb.Dataset(X_train, label=y_train, weight=weights)
             dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
             booster = lgb.train(
@@ -681,26 +860,41 @@ class LGBMDirectHIForecaster:
                 dtrain,
                 num_boost_round=1000,
                 valid_sets=[dval],
-                callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(-1)],
+                callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(-1), _pruning_cb],
             )
+            if _should_prune[0]:
+                raise optuna.TrialPruned()
             return float(np.mean(np.abs(booster.predict(X_val) - y_val.values)))
 
         # Change 6: persistent Optuna study with warm-start (LGBMDirectHIForecaster)
+        # station_id is included so parallel --workers runs don't share TPE state
+        import hashlib
+        _feat_sig = hashlib.sha256(
+            ("|".join(sorted(X_train.columns)) + f"|lags=[1,3,6,12,24]|roll=[3,6,24]").encode()
+        ).hexdigest()[:8]
         _OPTUNA_STORAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        study_name = f"lgbm_{self.target_kind}_h{self._horizon_h}"
+        study_name = f"lgbm_{self._station_id}_{self.target_kind}_h{self._horizon_h}_{_feat_sig}"
         try:
             _storage = optuna.storages.RDBStorage(f"sqlite:///{_OPTUNA_STORAGE_PATH}")
         except Exception:
             _storage = None
 
-        study = optuna.create_study(
-            study_name=study_name,
-            direction="minimize",
-            sampler=optuna.samplers.TPESampler(seed=self.random_state),
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0),
-            storage=_storage,
-            load_if_exists=True,
-        )
+        try:
+            study = optuna.create_study(
+                study_name=study_name,
+                direction="minimize",
+                sampler=optuna.samplers.TPESampler(seed=self.random_state),
+                pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0),
+                storage=_storage,
+                load_if_exists=True,
+            )
+        except Exception as exc:
+            logger.warning("Optuna persistent storage unavailable (%s). Falling back to in-memory study.", exc)
+            study = optuna.create_study(
+                direction="minimize",
+                sampler=optuna.samplers.TPESampler(seed=self.random_state),
+                pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0),
+            )
         study.optimize(objective, n_trials=self.n_trials, show_progress_bar=False)
         self._metadata["n_trials_completed"] = sum(t.state.name == "COMPLETE" for t in study.trials)
         self._metadata["n_trials_pruned"] = sum(t.state.name == "PRUNED" for t in study.trials)
@@ -759,6 +953,7 @@ class LGBMDirectHIForecaster:
         obj._best_params = bundle.get("best_params", {})
         obj._station_id = bundle.get("station_id", "")
         obj._horizon_h = bundle.get("horizon_h", 24)
+        obj.target_kind = bundle.get("target_kind", "hi")
         obj._metadata = {k: v for k, v in bundle.items()
                          if k not in ("feature_list", "feature_medians", "best_params",
                                       "backend_name", "target_kind", "station_id", "horizon_h")}

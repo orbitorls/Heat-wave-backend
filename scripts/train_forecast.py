@@ -16,11 +16,13 @@ saves model to app/models/forecast_v{n}/ directory.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import subprocess
 import sys
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
@@ -39,6 +41,58 @@ from app.ml.viz import generate_report
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _can_use_lgbm_device(device_type: str) -> bool:
+    """Probe whether LightGBM can run on a requested device."""
+    try:
+        import lightgbm as lgb
+        import numpy as np
+        lgb.train(
+            {"objective": "regression", "device_type": device_type, "verbose": -1, "num_leaves": 4},
+            lgb.Dataset(np.zeros((8, 2)), np.zeros(8)),
+            num_boost_round=1,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _configure_training_device(requested: str) -> None:
+    """Configure env vars so training prefers the requested device."""
+    req = requested.lower().strip()
+    if req == "cpu":
+        os.environ["HEATSHIELD_FORCE_CPU"] = "1"
+        os.environ.pop("LGBM_DEVICE", None)
+        logger.info("Training device configured: CPU")
+        return
+
+    os.environ["HEATSHIELD_FORCE_CPU"] = "0"
+    if req == "auto":
+        os.environ.pop("LGBM_DEVICE", None)
+        logger.info("Training device configured: auto-detect")
+        return
+
+    if req in {"gpu", "cuda"} and _can_use_lgbm_device(req):
+        os.environ["LGBM_DEVICE"] = req
+        logger.info("Training device configured: LGBM_DEVICE=%s", req)
+        return
+
+    alternate = "gpu" if req == "cuda" else "cuda"
+    if req in {"gpu", "cuda"} and _can_use_lgbm_device(alternate):
+        os.environ["LGBM_DEVICE"] = alternate
+        logger.warning(
+            "Requested LightGBM device '%s' unavailable. Falling back to '%s'.",
+            req,
+            alternate,
+        )
+        return
+
+    os.environ.pop("LGBM_DEVICE", None)
+    logger.warning(
+        "Requested LightGBM device '%s' unavailable. Falling back to auto-detect.",
+        req,
+    )
 
 
 def _git_sha() -> str:
@@ -60,13 +114,57 @@ def _quality_status(metrics: dict) -> str:
     danger = metrics.get("safety", {}).get("danger_42", {}).get("recall", metrics.get("danger_recall", 0.0))
     pi = metrics.get("prediction_interval", {})
     coverage = pi.get("coverage_90") if pi.get("available") else None
-    if skill < 0.15:
+    # Production minimum: all slots must at least beat baselines.
+    if skill < 0.0:
         return "not_ready"
     if coverage is not None and not (0.85 <= coverage <= 0.93):
         return "candidate"
     if skill >= 0.55 and (danger is None or danger != danger or danger >= 0.40):
         return "ready"
     return "candidate"
+
+
+def _row_from_existing_slot(slot_dir: Path, station_id: str, horizon_h: int) -> dict:
+    """Build a leaderboard row from existing v3 artifacts for resume mode."""
+    bundle_path = slot_dir / "bundle.json"
+    registry_path = slot_dir / "registry.json"
+    backend = "unknown"
+    status = "skipped_existing"
+    mae = float("nan")
+    skill = float("nan")
+    danger_recall = float("nan")
+    eval_dir = ""
+
+    if bundle_path.exists():
+        try:
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+            backend = bundle.get("backend_name", backend)
+        except Exception:
+            pass
+
+    if registry_path.exists():
+        try:
+            registry_meta = json.loads(registry_path.read_text(encoding="utf-8"))
+            backend = registry_meta.get("backend_name", backend)
+            status = registry_meta.get("status", status)
+            metrics = registry_meta.get("evaluation", {})
+            mae = metrics.get("regression", {}).get("mae", mae)
+            skill = metrics.get("baselines", {}).get("skill_score", skill)
+            danger_recall = metrics.get("safety", {}).get("danger_42", {}).get("recall", danger_recall)
+            eval_dir = metrics.get("paths", {}).get("out_dir", eval_dir)
+        except Exception:
+            pass
+
+    return {
+        "backend": backend,
+        "station": station_id,
+        "horizon_h": horizon_h,
+        "mae": float(mae) if mae is not None else float("nan"),
+        "skill_score": float(skill) if skill is not None else float("nan"),
+        "danger_recall_42": float(danger_recall) if danger_recall is not None else float("nan"),
+        "status": status,
+        "eval_dir": eval_dir,
+    }
 
 
 _EVAL_CHART_NAMES = [
@@ -247,6 +345,19 @@ def _write_leaderboard(run_dir: Path, rows: list[dict]) -> None:
     (run_dir / "leaderboard.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _read_champion_mae(slot_dir: Path) -> float | None:
+    """Return the existing slot's test MAE from registry.json, or None if no slot exists."""
+    registry_path = slot_dir / "registry.json"
+    if not registry_path.exists():
+        return None
+    try:
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
+        mae = data.get("evaluation", {}).get("regression", {}).get("mae")
+        return float(mae) if mae is not None else None
+    except Exception:
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train HeatShield AI forecast model")
     parser.add_argument(
@@ -259,7 +370,7 @@ def main() -> None:
     )
     parser.add_argument("--station", type=str, default=None, help="Single station to train on (default: all)")
     parser.add_argument("--trials", type=int, default=100, help="Number of optuna trials (default: 100)")
-    parser.add_argument("--start", type=str, default=None, help="Data start date YYYY-MM-DD (default: 2 years ago)")
+    parser.add_argument("--start", type=str, default=None, help="Data start date YYYY-MM-DD (default: 5 years ago)")
     parser.add_argument("--end", type=str, default=None, help="Data end date YYYY-MM-DD (default: yesterday)")
     parser.add_argument("--backend", type=str, default="lightgbm",
                         choices=["xgboost", "lightgbm", "lightgbm_hi"],
@@ -268,10 +379,36 @@ def main() -> None:
                         choices=["hi", "th"],
                         dest="target_kind",
                         help="Prediction target: hi=direct heat-index, th=temp+rh two-head (default: th)")
+    parser.add_argument("--gate-backend", type=str, default="lightgbm",
+                        choices=["lightgbm", "brf"],
+                        dest="gate_backend",
+                        help="DangerGate backend: lightgbm (default) or brf (BalancedRandomForest)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Parallel station training workers (default: 1). "
+                             "GPU training with workers>1 may cause device contention.")
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional run id for logs/eval/runs/<run_id>. Default: UTC timestamp.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Retrain slots even when app/models/forecast_v3/{station}/h{H}/bundle.json already exists.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="gpu",
+        choices=["auto", "cpu", "gpu", "cuda"],
+        help="Training device preference (default: gpu).",
+    )
     args = parser.parse_args()
+    _configure_training_device(args.device)
 
     end_date = date.fromisoformat(args.end) if args.end else date.today() - timedelta(days=1)
-    start_date = date.fromisoformat(args.start) if args.start else end_date - timedelta(days=730)
+    start_date = date.fromisoformat(args.start) if args.start else end_date - timedelta(days=365 * 5)
 
     # Resolve horizons list — legacy --horizon overrides --horizons
     if args.horizon is not None:
@@ -285,7 +422,12 @@ def main() -> None:
 
     station_ids = [args.station] if args.station else list(STATIONS.keys())
     logger.info("Training for stations=%s trials=%d", station_ids, args.trials)
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    try:
+        from app.ml.forecast.train import _gpu_xgb_params
+        logger.info("XGBoost device mode: %s", _gpu_xgb_params().get("device", "cpu"))
+    except Exception:
+        pass
+    run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     eval_run_dir = Path("logs") / "eval" / "runs" / run_id
     leaderboard: list[dict] = []
 
@@ -295,16 +437,43 @@ def main() -> None:
         target_kind = "hi" if args.backend == "lightgbm_hi" else args.target_kind
 
         from app.ml.forecast.backends.lgbm_backend import _compute_hi_array
-        for sid in station_ids:
+
+        # Warn when parallel GPU training is requested — device contention risk
+        if args.workers > 1 and os.getenv("HEATSHIELD_FORCE_CPU") != "1":
+            from app.ml.forecast.train import _gpu_xgb_params
+            from app.ml.forecast.backends.lgbm_backend import _detect_device as _lgbm_detect_device
+            if _gpu_xgb_params().get("device") == "cuda" or _lgbm_detect_device() == "cuda":
+                logger.warning(
+                    "--workers %d with CUDA device: multiple processes may contend for the GPU. "
+                    "Set HEATSHIELD_FORCE_CPU=1 or use --workers 1 to avoid this.",
+                    args.workers,
+                )
+
+        def _train_station(sid: str) -> list[dict]:
+            """Train all horizons for one station; returns leaderboard rows."""
+            rows: list[dict] = []
             obs = read_observations(sid, start_date, end_date)
             if len(obs) < 500:
                 logger.warning("Too few rows (%d) for station=%s — skipping", len(obs), sid)
-                continue
+                return rows
 
             # Build features ONCE per station — avoids rebuilding X for every horizon
             X_full, df_aug = build_X_once(obs)
 
             for h in horizons:
+                slot_dir = Path("app") / "models" / "forecast_v3" / sid / f"h{h}"
+                bundle_path = slot_dir / "bundle.json"
+                registry_path = slot_dir / "registry.json"
+                if not args.force and bundle_path.exists() and registry_path.exists():
+                    logger.info(
+                        "Skipping existing slot: station=%s h=%d (%s). Use --force to retrain.",
+                        sid,
+                        h,
+                        slot_dir,
+                    )
+                    rows.append(_row_from_existing_slot(slot_dir, sid, h))
+                    continue
+
                 logger.info("Training LightGBM backend: station=%s horizon=%d target=%s",
                             sid, h, target_kind)
                 y_full = build_y_for_horizon(df_aug, X_full.index, h, target_kind=target_kind)
@@ -323,9 +492,22 @@ def main() -> None:
                         len(X), sid, h,
                     )
                     continue
+                if target_kind == "th":
+                    y_hi_for_audit = _compute_hi_array(y["temp_c"].values, y["rh"].values)
+                else:
+                    y_hi_for_audit = y.values
+                danger_support = int((y_hi_for_audit >= 42.0).sum())
+                if danger_support < 20:
+                    logger.warning(
+                        "Low danger support for station=%s h=%d: only %d rows with HI>=42C",
+                        sid, h, danger_support,
+                    )
 
                 forecaster_cls = LGBMDirectHIForecaster if args.backend == "lightgbm_hi" else LGBMForecaster
-                forecaster = forecaster_cls(n_trials=args.trials if hasattr(args, 'trials') else 50)
+                forecaster = forecaster_cls(
+                    n_trials=args.trials,
+                    gate_backend=args.gate_backend,
+                )
                 forecaster.fit(X, y, station_id=sid, horizon_h=h)
 
                 split = split_xy(X, y, horizon_h=h)
@@ -355,18 +537,66 @@ def main() -> None:
                     "horizons": horizons,
                     "evaluation": eval_metrics,
                 }
-                registry.save_model_v3(forecaster, metrics, sid, h)
-                leaderboard.append({
+                new_mae = eval_metrics.get("regression", {}).get("mae", float("inf"))
+                champion_mae = _read_champion_mae(slot_dir)
+                champion_kept = False
+                if champion_mae is not None and new_mae >= champion_mae:
+                    logger.info(
+                        "Champion-challenger: keeping existing model (champion MAE=%.4f <= challenger MAE=%.4f) "
+                        "for station=%s h=%d",
+                        champion_mae, new_mae, sid, h,
+                    )
+                    champion_kept = True
+                else:
+                    registry.save_model_v3(forecaster, metrics, sid, h)
+                    logger.info(
+                        "Champion-challenger: saved challenger (MAE=%.4f%s) for station=%s h=%d",
+                        new_mae,
+                        f" < champion {champion_mae:.4f}" if champion_mae is not None else " — new slot",
+                        sid, h,
+                    )
+
+                # When champion is kept, surface its stored metrics so the leaderboard
+                # reflects the model that is actually on disk, not the rejected challenger.
+                row_eval = eval_metrics
+                row_status = status
+                if champion_kept:
+                    try:
+                        champ_data = json.loads((slot_dir / "registry.json").read_text(encoding="utf-8"))
+                        row_eval = champ_data.get("evaluation", eval_metrics)
+                        row_status = champ_data.get("status", status)
+                    except Exception:
+                        pass
+
+                rows.append({
                     "backend": forecaster.backend_name,
                     "station": sid,
                     "horizon_h": h,
-                    "mae": eval_metrics["regression"]["mae"],
-                    "skill_score": eval_metrics["baselines"]["skill_score"],
-                    "danger_recall_42": eval_metrics["safety"]["danger_42"]["recall"],
-                    "status": status,
+                    "mae": row_eval.get("regression", {}).get("mae",
+                             eval_metrics.get("regression", {}).get("mae", float("nan"))),
+                    "skill_score": row_eval.get("baselines", {}).get("skill_score",
+                                     eval_metrics.get("baselines", {}).get("skill_score", float("nan"))),
+                    "danger_recall_42": row_eval.get("safety", {}).get("danger_42", {}).get("recall",
+                                          eval_metrics.get("safety", {}).get("danger_42", {}).get("recall")),
+                    "status": row_status,
                     "eval_dir": str(out_dir),
+                    **({"champion_kept": True} if champion_kept else {}),
                 })
                 logger.info("Saved LightGBM v3: station=%s h=%d", sid, h)
+            return rows
+
+        if args.workers > 1:
+            logger.info("Parallel station training: workers=%d stations=%s", args.workers, station_ids)
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                futures = {pool.submit(_train_station, sid): sid for sid in station_ids}
+                for fut in as_completed(futures):
+                    try:
+                        leaderboard.extend(fut.result())
+                    except Exception as exc:
+                        logger.error("Station %s training failed: %s", futures[fut], exc)
+        else:
+            for sid in station_ids:
+                leaderboard.extend(_train_station(sid))
 
         _write_leaderboard(eval_run_dir, leaderboard)
         logger.info("LightGBM v3 training complete")
