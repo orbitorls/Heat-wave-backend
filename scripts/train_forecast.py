@@ -528,6 +528,7 @@ def main() -> None:
                     q95=bundle.hi_upper,
                     runtime={"train_seconds": forecaster._metadata.get("train_seconds", 0.0)},
                     split_metadata=split.metadata,
+                    station=sid,
                 )
                 status = _quality_status(eval_metrics)
                 metrics = {
