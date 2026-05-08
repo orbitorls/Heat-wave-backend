@@ -177,8 +177,8 @@ def compute_metrics(
     }
 
 
-def _save_confusion(metrics: dict, out_dir: Path) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+def _save_confusion(metrics: dict, out_dir: Path, *, dpi: int = 80) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(8, 5))
     sns.heatmap(metrics["risk"]["confusion_matrix"], annot=True, fmt="d", cmap="Blues",
                 xticklabels=_CATEGORY_LABELS, yticklabels=_CATEGORY_LABELS, ax=axes[0])
     axes[0].set_title("Risk Category Counts")
@@ -190,11 +190,13 @@ def _save_confusion(metrics: dict, out_dir: Path) -> None:
     axes[1].set_xlabel("Predicted")
     axes[1].set_ylabel("Actual")
     fig.tight_layout()
-    fig.savefig(out_dir / "confusion_matrix.png", dpi=140, bbox_inches="tight")
+    fig.savefig(out_dir / "confusion_matrix.png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
-def _save_classification(metrics: dict, out_dir: Path) -> None:
+def _save_classification(
+    metrics: dict, out_dir: Path, horizon_h: int = 24, station: str = "", *, dpi: int = 80
+) -> None:
     report = metrics["risk"]["classification_report"]
     rows = [report[label] for label in _CATEGORY_LABELS]
     x = np.arange(len(_CATEGORY_LABELS))
@@ -204,9 +206,12 @@ def _save_classification(metrics: dict, out_dir: Path) -> None:
     ax.set_xticks(x)
     ax.set_xticklabels(_CATEGORY_LABELS, rotation=15, ha="right")
     ax.set_ylim(0, 1.05)
+    ax.set_xlabel("Risk Category")
+    ax.set_ylabel("Score")
+    ax.set_title(f"Classification Report | h{horizon_h} | {station}")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(out_dir / "classification_report.png", dpi=140, bbox_inches="tight")
+    fig.savefig(out_dir / "classification_report.png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -216,6 +221,10 @@ def _save_error_plots(
     X: pd.DataFrame,
     out_dir: Path,
     station_labels: Mapping[int, str] | None,
+    horizon_h: int = 24,
+    station: str = "",
+    *,
+    dpi: int = 80,
 ) -> None:
     residual = y_pred - y_true
     abs_err = np.abs(residual)
@@ -224,59 +233,84 @@ def _save_error_plots(
     lo = float(min(y_true.min(), y_pred.min()))
     hi = float(max(y_true.max(), y_pred.max()))
     axes[0].plot([lo, hi], [lo, hi], "k--", linewidth=1)
-    axes[0].set_xlabel("Actual HI")
-    axes[0].set_ylabel("Predicted HI")
+    axes[0].set_xlabel("Actual HI (°C)")
+    axes[0].set_ylabel("Predicted HI (°C)")
+    axes[0].set_title(f"Predicted vs Actual | h{horizon_h} | {station}")
     axes[1].hist(residual, bins=min(40, max(5, len(y_true) // 2)))
     axes[1].axvline(0, color="black", linestyle="--")
-    axes[1].set_xlabel("Prediction Error")
+    axes[1].set_xlabel("Prediction Error (°C)")
+    axes[1].set_ylabel("Count")
+    axes[1].set_title(f"Error Distribution | h{horizon_h} | {station}")
     fig.tight_layout()
-    fig.savefig(out_dir / "pred_vs_actual.png", dpi=140, bbox_inches="tight")
+    fig.savefig(out_dir / "pred_vs_actual.png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
     hours = _hours_from_features(X, len(y_true))
     by_hour = pd.DataFrame({"hour": hours, "abs_err": abs_err, "err": residual}).groupby("hour").mean()
     fig, ax = plt.subplots(figsize=(10, 4))
     by_hour["abs_err"].reindex(range(24), fill_value=0).plot(kind="bar", ax=ax)
-    ax.set_ylabel("MAE")
+    ax.set_xlabel("Hour of Day")
+    ax.set_ylabel("Mean Absolute Error (°C)")
+    ax.set_title(f"Error by Hour | h{horizon_h} | {station}")
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=0)
     fig.tight_layout()
-    fig.savefig(out_dir / "error_by_hour.png", dpi=140, bbox_inches="tight")
+    fig.savefig(out_dir / "error_by_hour.png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
     stations = _station_names(X, station_labels)
     by_station = pd.DataFrame({"station": stations, "abs_err": abs_err}).groupby("station").mean()
     fig, ax = plt.subplots(figsize=(8, 4))
     by_station["abs_err"].plot(kind="bar", ax=ax)
-    ax.set_ylabel("MAE")
+    ax.set_xlabel("Station")
+    ax.set_ylabel("Mean Absolute Error (°C)")
+    ax.set_title(f"Error by Station | h{horizon_h} | {station}")
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=15, ha="right")
     fig.tight_layout()
-    fig.savefig(out_dir / "error_by_station.png", dpi=140, bbox_inches="tight")
+    fig.savefig(out_dir / "error_by_station.png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
     heat = pd.DataFrame({"station": stations, "hour": hours, "abs_err": abs_err})
     pivot = heat.pivot_table(index="station", columns="hour", values="abs_err", aggfunc="mean")
-    fig, ax = plt.subplots(figsize=(12, max(3, 0.8 * len(pivot))))
+    fig, ax = plt.subplots(figsize=(12, max(3, int(0.8 * len(pivot)))))
     sns.heatmap(pivot, cmap="YlOrRd", ax=ax)
+    ax.set_xlabel("Hour of Day")
+    ax.set_ylabel("Station")
+    ax.set_title(f"Error Heatmap | h{horizon_h} | {station}")
     fig.tight_layout()
-    fig.savefig(out_dir / "error_heatmap.png", dpi=140, bbox_inches="tight")
+    fig.savefig(out_dir / "error_heatmap.png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
-def _save_pi_plots(y_true: np.ndarray, q05: np.ndarray | None, q95: np.ndarray | None, out_dir: Path) -> None:
+def _save_pi_plots(
+    y_true: np.ndarray,
+    q05: np.ndarray | None,
+    q95: np.ndarray | None,
+    out_dir: Path,
+    horizon_h: int = 24,
+    station: str = "",
+    *,
+    dpi: int = 80,
+) -> None:
     if q05 is None or q95 is None:
         return
     coverage = ((y_true >= q05) & (y_true <= q95)).astype(int)
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.bar(["outside", "inside"], [(coverage == 0).mean(), coverage.mean()])
+    ax.bar(["Outside PI", "Inside PI"], [(coverage == 0).mean(), coverage.mean()])
     ax.set_ylim(0, 1)
-    ax.set_ylabel("Share")
+    ax.set_ylabel("Share of Predictions")
+    ax.set_xlabel("Prediction Interval Coverage")
+    ax.set_title(f"PI Calibration | h{horizon_h} | {station}")
     fig.tight_layout()
-    fig.savefig(out_dir / "pi_calibration.png", dpi=140, bbox_inches="tight")
+    fig.savefig(out_dir / "pi_calibration.png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.hist(q95 - q05, bins=min(40, max(5, len(y_true) // 2)))
-    ax.set_xlabel("q95 - q05")
+    ax.set_xlabel("Prediction Interval Width (q95 - q05, °C)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"PI Width Distribution | h{horizon_h} | {station}")
     fig.tight_layout()
-    fig.savefig(out_dir / "pi_width.png", dpi=140, bbox_inches="tight")
+    fig.savefig(out_dir / "pi_width.png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -311,6 +345,8 @@ def evaluate_predictions(
     q95: np.ndarray | pd.Series | None = None,
     runtime: dict | None = None,
     split_metadata: dict | None = None,
+    station: str = "",
+    eval_dpi: int = 80,
 ) -> dict:
     """Compute metrics and write standard evaluation artifacts."""
     started = time.perf_counter()
@@ -322,6 +358,10 @@ def evaluate_predictions(
     q05_arr = None if q05 is None else np.asarray(q05, dtype=float)
     q95_arr = None if q95 is None else np.asarray(q95, dtype=float)
     runtime_data = dict(runtime or {})
+
+    # Derive station name from station_labels if not provided
+    if not station and station_labels:
+        station = list(station_labels.values())[0] if station_labels else ""
 
     metrics = compute_metrics(
         y_true_arr,
@@ -342,8 +382,10 @@ def evaluate_predictions(
         encoding="utf-8",
     )
     _write_summary(metrics, out_path)
-    _save_confusion(metrics, out_path)
-    _save_classification(metrics, out_path)
-    _save_error_plots(y_true_arr, y_pred_arr, X, out_path, station_labels)
-    _save_pi_plots(y_true_arr, q05_arr, q95_arr, out_path)
+    _save_confusion(metrics, out_path, dpi=eval_dpi)
+    _save_classification(metrics, out_path, horizon_h=horizon_h, station=station, dpi=eval_dpi)
+    _save_error_plots(
+        y_true_arr, y_pred_arr, X, out_path, station_labels, horizon_h=horizon_h, station=station, dpi=eval_dpi
+    )
+    _save_pi_plots(y_true_arr, q05_arr, q95_arr, out_path, horizon_h=horizon_h, station=station, dpi=eval_dpi)
     return _json_safe(metrics)

@@ -16,6 +16,7 @@ saves model to app/models/forecast_v{n}/ directory.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import subprocess
@@ -25,6 +26,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
+from threading import Lock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -35,6 +37,7 @@ from app.data.stations import STATIONS
 from app.ml.forecast.features import build_features, build_X_once, build_y_for_horizon, _DEFAULT_LAGS_H, _DEFAULT_ROLLING_H
 from app.ml.forecast.train import train
 from app.ml.forecast.evaluation import evaluate_predictions
+from app.ml.forecast._optuna_utils import write_heartbeat
 from app.ml.forecast.splitting import split_xy
 from app.ml.registry import save_model
 from app.ml.viz import generate_report
@@ -328,10 +331,13 @@ def _generate_summary_chart(run_dir: Path, rows: list[dict]) -> Path:
 
 def _write_leaderboard(run_dir: Path, rows: list[dict]) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "leaderboard.json").write_text(
-        __import__("json").dumps(rows, indent=2, ensure_ascii=False, default=str),
+    json_path = run_dir / "leaderboard.json"
+    json_tmp = json_path.with_suffix(".json.tmp")
+    json_tmp.write_text(
+        json.dumps(rows, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
     )
+    os.replace(json_tmp, json_path)
     lines = [
         "| Backend | Station | Horizon | MAE | Skill | Danger Recall >=42C | Status |",
         "|---|---|---:|---:|---:|---:|---|",
@@ -342,7 +348,10 @@ def _write_leaderboard(run_dir: Path, rows: list[dict]) -> None:
             f"{row.get('mae', float('nan')):.3f} | {row.get('skill_score', float('nan')):.3f} | "
             f"{(row['danger_recall_42'] if row.get('danger_recall_42') is not None else float('nan')):.3f} | {row['status']} |"
         )
-    (run_dir / "leaderboard.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    md_path = run_dir / "leaderboard.md"
+    md_tmp = md_path.with_suffix(".md.tmp")
+    md_tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(md_tmp, md_path)
 
 
 def _read_champion_mae(slot_dir: Path) -> float | None:
@@ -395,7 +404,7 @@ def main() -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Retrain slots even when app/models/forecast_v3/{station}/h{H}/bundle.json already exists.",
+        help="Retrain slots even when app/models/forecast_<ver>/{station}/h{H}/bundle.json already exists.",
     )
     parser.add_argument(
         "--device",
@@ -404,7 +413,18 @@ def main() -> None:
         choices=["auto", "cpu", "gpu", "cuda"],
         help="Training device preference (default: gpu).",
     )
+    parser.add_argument(
+        "--model-version", type=str, default="v3",
+        dest="model_version",
+        help="Registry layout version under app/models/forecast_<ver>/ (default: v3).",
+    )
+    parser.add_argument(
+        "--backends",
+        default="lgbm",
+        help="Comma-separated list of backends to train: lgbm,catboost,xgb (default: lgbm)",
+    )
     args = parser.parse_args()
+    os.environ["HEATSHIELD_FORECAST_VERSION"] = args.model_version
     _configure_training_device(args.device)
 
     end_date = date.fromisoformat(args.end) if args.end else date.today() - timedelta(days=1)
@@ -430,6 +450,24 @@ def main() -> None:
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     eval_run_dir = Path("logs") / "eval" / "runs" / run_id
     leaderboard: list[dict] = []
+    leaderboard_lock = Lock()
+    os.environ["HEATSHIELD_RUN_ID"] = run_id
+    write_heartbeat(run_id, phase="start", extra={"model_version": args.model_version})
+
+    def _record_leaderboard_row(row: dict) -> None:
+        with leaderboard_lock:
+            leaderboard.append(row)
+            _write_leaderboard(eval_run_dir, leaderboard)
+            drive_root = os.environ.get("HEATSHIELD_DRIVE_ROOT")
+            if drive_root:
+                try:
+                    import shutil
+                    dst = Path(drive_root) / "logs" / "train" / run_id
+                    dst.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(eval_run_dir / "leaderboard.json", dst / "leaderboard.json")
+                    shutil.copy2(eval_run_dir / "leaderboard.md", dst / "leaderboard.md")
+                except Exception:
+                    pass
 
     if args.backend in {"lightgbm", "lightgbm_hi"}:
         from app.ml.forecast.backends.lgbm_backend import LGBMDirectHIForecaster, LGBMForecaster
@@ -438,16 +476,17 @@ def main() -> None:
 
         from app.ml.forecast.backends.lgbm_backend import _compute_hi_array
 
-        # Warn when parallel GPU training is requested — device contention risk
+        # GPU workers contend for the same device memory in Colab. Force serial
+        # station scheduling instead of letting multiple processes OOM mid-run.
         if args.workers > 1 and os.getenv("HEATSHIELD_FORCE_CPU") != "1":
             from app.ml.forecast.train import _gpu_xgb_params
             from app.ml.forecast.backends.lgbm_backend import _detect_device as _lgbm_detect_device
-            if _gpu_xgb_params().get("device") == "cuda" or _lgbm_detect_device() == "cuda":
+            if _gpu_xgb_params().get("device") == "cuda" or _lgbm_detect_device() in {"cuda", "gpu"}:
                 logger.warning(
-                    "--workers %d with CUDA device: multiple processes may contend for the GPU. "
-                    "Set HEATSHIELD_FORCE_CPU=1 or use --workers 1 to avoid this.",
+                    "--workers %d requested with GPU training. Forcing --workers 1 to avoid GPU memory contention.",
                     args.workers,
                 )
+                args.workers = 1
 
         def _train_station(sid: str) -> list[dict]:
             """Train all horizons for one station; returns leaderboard rows."""
@@ -461,17 +500,22 @@ def main() -> None:
             X_full, df_aug = build_X_once(obs)
 
             for h in horizons:
-                slot_dir = Path("app") / "models" / "forecast_v3" / sid / f"h{h}"
+                current_slot = f"{sid}:h{h}"
+                write_heartbeat(run_id, current_slot=current_slot, phase="slot_start")
+                slot_dir = Path("app") / "models" / f"forecast_{args.model_version}" / sid / f"h{h}"
                 bundle_path = slot_dir / "bundle.json"
                 registry_path = slot_dir / "registry.json"
                 if not args.force and bundle_path.exists() and registry_path.exists():
-                    logger.info(
-                        "Skipping existing slot: station=%s h=%d (%s). Use --force to retrain.",
+                    logger.warning(
+                        "SKIP station=%s h=%d — bundle already exists. Pass --force to retrain. (%s)",
                         sid,
                         h,
                         slot_dir,
                     )
-                    rows.append(_row_from_existing_slot(slot_dir, sid, h))
+                    row = _row_from_existing_slot(slot_dir, sid, h)
+                    rows.append(row)
+                    _record_leaderboard_row(row)
+                    write_heartbeat(run_id, current_slot=current_slot, phase="skipped_existing")
                     continue
 
                 logger.info("Training LightGBM backend: station=%s horizon=%d target=%s",
@@ -508,6 +552,7 @@ def main() -> None:
                     n_trials=args.trials,
                     gate_backend=args.gate_backend,
                 )
+                write_heartbeat(run_id, current_slot=current_slot, phase="fit")
                 forecaster.fit(X, y, station_id=sid, horizon_h=h)
 
                 split = split_xy(X, y, horizon_h=h)
@@ -529,7 +574,9 @@ def main() -> None:
                     runtime={"train_seconds": forecaster._metadata.get("train_seconds", 0.0)},
                     split_metadata=split.metadata,
                     station=sid,
+                    eval_dpi=80,
                 )
+                write_heartbeat(run_id, current_slot=current_slot, phase="eval")
                 status = _quality_status(eval_metrics)
                 metrics = {
                     "run_id": run_id,
@@ -541,7 +588,10 @@ def main() -> None:
                 new_mae = eval_metrics.get("regression", {}).get("mae", float("inf"))
                 champion_mae = _read_champion_mae(slot_dir)
                 champion_kept = False
-                if champion_mae is not None and new_mae >= champion_mae:
+                # When --force is set, bypass champion-challenger: the old champion's
+                # MAE may be optimistic (trained before the val-leakage fix), so a
+                # head-to-head comparison would incorrectly reject the corrected model.
+                if not args.force and champion_mae is not None and new_mae >= champion_mae:
                     logger.info(
                         "Champion-challenger: keeping existing model (champion MAE=%.4f <= challenger MAE=%.4f) "
                         "for station=%s h=%d",
@@ -569,7 +619,7 @@ def main() -> None:
                     except Exception:
                         pass
 
-                rows.append({
+                row = {
                     "backend": forecaster.backend_name,
                     "station": sid,
                     "horizon_h": h,
@@ -582,8 +632,32 @@ def main() -> None:
                     "status": row_status,
                     "eval_dir": str(out_dir),
                     **({"champion_kept": True} if champion_kept else {}),
-                })
+                }
+                rows.append(row)
+                _record_leaderboard_row(row)
+                write_heartbeat(run_id, current_slot=current_slot, phase="slot_done")
                 logger.info("Saved LightGBM v3: station=%s h=%d", sid, h)
+                del forecaster, bundle, split
+                gc.collect()
+
+                # Optional CatBoost training when --backends includes "catboost"
+                backends_to_train = [b.strip() for b in getattr(args, "backends", "lgbm").split(",")]
+                if "catboost" in backends_to_train:
+                    try:
+                        from app.ml.forecast.backends.catboost_backend import CatBoostForecaster
+                        logger.info("Training CatBoost backend: station=%s horizon=%d", sid, h)
+                        catboost_forecaster = CatBoostForecaster(
+                            n_trials=getattr(args, "trials", 10),
+                            random_state=42,
+                        )
+                        catboost_forecaster.fit(X, y, station_id=sid, horizon_h=h)
+                        catboost_path = slot_dir / "catboost"
+                        catboost_forecaster.save(catboost_path)
+                        logger.info("CatBoost model saved to %s", catboost_path)
+                        del catboost_forecaster
+                        gc.collect()
+                    except Exception as exc:
+                        logger.warning("CatBoost training failed (%s) — skipping", exc)
             return rows
 
         if args.workers > 1:
@@ -592,12 +666,12 @@ def main() -> None:
                 futures = {pool.submit(_train_station, sid): sid for sid in station_ids}
                 for fut in as_completed(futures):
                     try:
-                        leaderboard.extend(fut.result())
+                        fut.result()
                     except Exception as exc:
                         logger.error("Station %s training failed: %s", futures[fut], exc)
         else:
             for sid in station_ids:
-                leaderboard.extend(_train_station(sid))
+                _train_station(sid)
 
         _write_leaderboard(eval_run_dir, leaderboard)
         logger.info("LightGBM v3 training complete")
@@ -636,6 +710,7 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     all_horizon_results: dict[int, dict] = {}
     for horizon_h in horizons:
+        write_heartbeat(run_id, current_slot=f"all:h{horizon_h}", phase="slot_start")
         logger.info("=" * 50)
         logger.info("Training horizon = %dh", horizon_h)
 
@@ -656,6 +731,7 @@ def main() -> None:
             sys.exit(1)
 
         result = train(X, y, station_id=",".join(station_ids), horizon_h=horizon_h, n_trials=args.trials)
+        write_heartbeat(run_id, current_slot=f"all:h{horizon_h}", phase="eval")
         all_horizon_results[horizon_h] = result
         logger.info("h%d metrics: %s", horizon_h, _fmt_metrics(result["metrics"]))
         preds = result["test_predictions"]
@@ -672,11 +748,12 @@ def main() -> None:
             q95=preds.get("q95"),
             runtime={"train_seconds": result["training"]["train_seconds"]},
             split_metadata=result["split_metadata"],
+            eval_dpi=80,
         )
         status = _quality_status(eval_metrics)
         result["evaluation"] = eval_metrics
         result["status"] = status
-        leaderboard.append({
+        row = {
             "backend": "xgboost_hi",
             "station": "all",
             "horizon_h": horizon_h,
@@ -685,7 +762,10 @@ def main() -> None:
             "danger_recall_42": eval_metrics["safety"]["danger_42"]["recall"],
             "status": status,
             "eval_dir": str(out_dir),
-        })
+        }
+        _record_leaderboard_row(row)
+        write_heartbeat(run_id, current_slot=f"all:h{horizon_h}", phase="slot_done")
+        gc.collect()
 
     logger.info("=" * 50)
 

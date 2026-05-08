@@ -65,13 +65,13 @@ def _load_calibration(station_id: str, horizon_h: int) -> Calibration | None:
 def predict(
     station_id: str,
     recent_obs: list[StationObservation],
-    horizons: list[int] = [6, 24, 48],
+    horizons: list[int] | None = None,
 ) -> tuple[list[ForecastPoint], bool, str | None]:
     """Forecast heat index for requested horizons.
 
     Args:
         station_id: Station identifier.
-        recent_obs: Recent hourly observations. Must cover at least max(lags_h)+1 = 25 hours.
+        recent_obs: Recent observations. Must cover at least max(lags_h)+1 = 25 hours.
         horizons: Forecast horizons in hours.
 
     Returns:
@@ -81,10 +81,13 @@ def predict(
         FileNotFoundError: If no trained model exists (run train_forecast.py first).
         ValueError: If recent_obs is insufficient for feature engineering.
     """
-    if len(recent_obs) < 26:
+    if horizons is None:
+        horizons = [6, 24, 48]
+
+    if len(recent_obs) < max(_DEFAULT_LAGS_H) + 2:
         raise ValueError(
-            f"Need at least 26 recent observations (got {len(recent_obs)}). "
-            "Provide at least 25 hours of hourly data."
+            f"Need at least {max(_DEFAULT_LAGS_H) + 2} recent observations (got {len(recent_obs)}). "
+            f"Provide at least {max(_DEFAULT_LAGS_H) + 1} hours of hourly data."
         )
 
     loaded = load_latest("forecast")
@@ -137,7 +140,8 @@ def predict(
                     lags_h=_DEFAULT_LAGS_H,
                     rolling_h=_DEFAULT_ROLLING_H,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning("v3 forecaster failed for station=%s h=%d: %s", station_id, h, exc)
                 break
             if _X_v3.empty:
                 break

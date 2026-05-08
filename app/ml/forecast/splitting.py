@@ -28,6 +28,19 @@ class XYSplit:
     metadata: dict
 
 
+@dataclass(frozen=True)
+class XYSplit4Way:
+    X_train: pd.DataFrame
+    y_train: pd.DataFrame | pd.Series
+    X_val_es: pd.DataFrame
+    y_val_es: pd.DataFrame | pd.Series
+    X_val_cal: pd.DataFrame
+    y_val_cal: pd.DataFrame | pd.Series
+    X_test: pd.DataFrame
+    y_test: pd.DataFrame | pd.Series
+    metadata: dict
+
+
 def _sort_for_time(df: pd.DataFrame) -> pd.DataFrame:
     if "ts_utc" in df.columns:
         keys = ["ts_utc"]
@@ -114,6 +127,87 @@ def split_xy(
         X_test=_clean_frame(X_ordered.iloc[val_end:]),
         y_test=y_ordered.iloc[val_end:].reset_index(drop=True),
         metadata=split.metadata,
+    )
+
+
+def split_xy_4way(
+    X: pd.DataFrame,
+    y: pd.DataFrame | pd.Series,
+    *,
+    horizon_h: int,
+    train_frac: float = 0.70,
+    val_es_frac: float = 0.075,
+    val_cal_frac: float = 0.075,
+) -> XYSplit4Way:
+    """Chronological 4-way split: train/val_es/val_cal/test (70/7.5/7.5/15).
+
+    val_es  — early-stopping only (booster never calibrated on this)
+    val_cal — MondrianCQR residuals + DangerGate threshold sweep
+    test    — held-out metrics reported in bundle.json
+    """
+    meta = pd.DataFrame({"_pos": np.arange(len(X))})
+    if "ts_utc" in X.attrs:
+        meta["ts_utc"] = pd.Series(X.attrs["ts_utc"]).reset_index(drop=True)
+    if "station_id" in X.attrs:
+        meta["station_id"] = pd.Series(X.attrs["station_id"]).reset_index(drop=True)
+
+    ordered_meta = _sort_for_time(meta)
+    order = ordered_meta["_pos"].to_numpy()
+    X_ordered = X.iloc[order].reset_index(drop=True)
+    y_ordered = y.iloc[order].reset_index(drop=True)
+
+    n = len(X_ordered)
+    n_train = int(n * train_frac)
+    n_val_es = int(n * val_es_frac)
+    n_val_cal = int(n * val_cal_frac)
+    es_end = n_train + n_val_es
+    cal_end = es_end + n_val_cal
+
+    def _cf(frame: pd.DataFrame) -> pd.DataFrame:
+        out = frame.reset_index(drop=True)
+        out.attrs.clear()
+        return out
+
+    def _cy(series: pd.Series) -> pd.Series:
+        return series.reset_index(drop=True)
+
+    ts_col = ordered_meta.get("ts_utc") if "ts_utc" in ordered_meta.columns else None
+
+    def _rng(sl: slice) -> dict | None:
+        if ts_col is None:
+            return None
+        chunk = ts_col.iloc[sl]
+        return {"start": str(chunk.iloc[0]), "end": str(chunk.iloc[-1])} if len(chunk) else None
+
+    metadata = {
+        "horizon_h": horizon_h,
+        "row_counts": {
+            "train": n_train,
+            "val_es": n_val_es,
+            "val_cal": n_val_cal,
+            "test": n - cal_end,
+        },
+        "date_ranges": {
+            "train": _rng(slice(None, n_train)),
+            "val_es": _rng(slice(n_train, es_end)),
+            "val_cal": _rng(slice(es_end, cal_end)),
+            "test": _rng(slice(cal_end, None)),
+        },
+        "stations": sorted(ordered_meta["station_id"].dropna().astype(str).unique().tolist())
+        if "station_id" in ordered_meta.columns
+        else [],
+    }
+
+    return XYSplit4Way(
+        X_train=_cf(X_ordered.iloc[:n_train]),
+        y_train=_cy(y_ordered.iloc[:n_train]),
+        X_val_es=_cf(X_ordered.iloc[n_train:es_end]),
+        y_val_es=_cy(y_ordered.iloc[n_train:es_end]),
+        X_val_cal=_cf(X_ordered.iloc[es_end:cal_end]),
+        y_val_cal=_cy(y_ordered.iloc[es_end:cal_end]),
+        X_test=_cf(X_ordered.iloc[cal_end:]),
+        y_test=_cy(y_ordered.iloc[cal_end:]),
+        metadata=metadata,
     )
 
 

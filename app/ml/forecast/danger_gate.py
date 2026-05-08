@@ -24,6 +24,11 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def _training_n_jobs() -> int:
+    """Conservative default avoids multiprocessing failures in Colab/Windows sandboxes."""
+    return max(1, int(os.environ.get("HEATSHIELD_TRAIN_N_JOBS", "1")))
+
+
 def _lgbm_device() -> str:
     """Return best LightGBM device respecting runtime env overrides."""
     env = os.getenv("LGBM_DEVICE", "").lower()
@@ -128,8 +133,11 @@ class DangerGate:
     ) -> None:
         try:
             import lightgbm as lgb
+            import optuna
+
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
         except ImportError as exc:
-            raise ImportError("pip install lightgbm") from exc
+            raise ImportError("pip install lightgbm optuna") from exc
 
         device = _lgbm_device()
         class_counts = np.bincount(y_tier, minlength=3)
@@ -139,26 +147,76 @@ class DangerGate:
         }
         sample_weight = np.array([class_weight[int(cls)] for cls in y_tier], dtype=float)
 
-        params = {
+        base_params = {
             "objective": "multiclass",
             "num_class": 3,
             "metric": "multi_logloss",
+            "seed": random_state,
+            "verbose": -1,
+            "device_type": device,
+            **({"n_jobs": _training_n_jobs()} if device == "cpu" else {}),
+        }
+
+        # Optuna mini-search (20 trials) — only when we have a validation set
+        best_lgbm_params = {
             "num_leaves": 63,
             "learning_rate": 0.05,
             "subsample": 0.8,
             "colsample_bytree": 0.8,
-            "seed": random_state,
-            "verbose": -1,
-            "device_type": device,
-            **({"n_jobs": -1} if device == "cpu" else {}),
+            "min_child_samples": 20,
+            "reg_alpha": 0.1,
+            "reg_lambda": 1.0,
         }
 
+        if val_X is not None and val_y_hi is not None:
+            y_val_tier = self._to_tier(val_y_hi, self.warning_floor, self.danger_floor)
+            dtrain_opt = lgb.Dataset(X, label=y_tier, weight=sample_weight)
+            dval_opt = lgb.Dataset(val_X, label=y_val_tier, reference=dtrain_opt)
+
+            def _gate_objective(trial: optuna.Trial) -> float:
+                trial_params = {
+                    **base_params,
+                    "num_leaves": trial.suggest_int("num_leaves", 31, 127),
+                    "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
+                    "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+                    "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+                    "min_child_samples": trial.suggest_int("min_child_samples", 10, 80),
+                    "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 5.0, log=True),
+                    "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 5.0, log=True),
+                }
+                bst = lgb.train(
+                    trial_params,
+                    dtrain_opt,
+                    num_boost_round=trial.suggest_int("n_estimators", 100, 500),
+                    valid_sets=[dval_opt],
+                    callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(-1)],
+                )
+                proba = np.asarray(bst.predict(val_X))
+                pred_tier = np.argmax(proba, axis=1)
+                # macro-F1 (negate for minimization)
+                from sklearn.metrics import f1_score
+
+                f1 = f1_score(y_val_tier, pred_tier, average="macro", zero_division=0)
+                return -f1
+
+            study = optuna.create_study(
+                direction="minimize",
+                sampler=optuna.samplers.TPESampler(seed=random_state),
+                pruner=optuna.pruners.MedianPruner(n_startup_trials=5),
+            )
+            study.optimize(_gate_objective, n_trials=20, show_progress_bar=False)
+            best_lgbm_params.update(
+                {k: v for k, v in study.best_params.items() if k not in ("n_estimators",)}
+            )
+            n_estimators = study.best_params.get("n_estimators", n_estimators)
+
+        params = {**base_params, **best_lgbm_params}
         dtrain = lgb.Dataset(X, label=y_tier, weight=sample_weight)
         valid_sets = None
         callbacks = [lgb.log_evaluation(-1)]
         if val_X is not None and val_y_hi is not None:
-            y_val_tier = self._to_tier(val_y_hi, self.warning_floor, self.danger_floor)
-            dval = lgb.Dataset(val_X, label=y_val_tier, reference=dtrain)
+            y_val_tier_final = self._to_tier(val_y_hi, self.warning_floor, self.danger_floor)
+            dval = lgb.Dataset(val_X, label=y_val_tier_final, reference=dtrain)
             valid_sets = [dval]
             callbacks = [lgb.early_stopping(50, verbose=False), lgb.log_evaluation(-1)]
 
@@ -192,7 +250,7 @@ class DangerGate:
             replacement=True,
             bootstrap=True,
             random_state=random_state,
-            n_jobs=1,
+            n_jobs=_training_n_jobs(),
         )
         self._clf.fit(X, y_tier)
         self._is_legacy_binary = False
@@ -208,6 +266,7 @@ class DangerGate:
             precision_min=0.50,
             recall_min=0.55,
             default=0.30,
+            beta=1.0,  # equal weight for precision/recall on warning
         )
         self.danger_threshold = self._best_threshold(
             proba[:, 2],
@@ -215,6 +274,7 @@ class DangerGate:
             precision_min=0.55,
             recall_min=0.40,
             default=0.35,
+            beta=2.0,  # recall-heavy for danger tier
         )
 
     @staticmethod
@@ -225,9 +285,11 @@ class DangerGate:
         precision_min: float,
         recall_min: float,
         default: float,
+        beta: float = 1.0,
     ) -> float:
-        candidates: list[tuple[float, float, float]] = []
-        for t in np.arange(0.10, 0.85, 0.05):
+        """Find threshold maximizing F-beta score subject to min precision/recall constraints."""
+        candidates: list[tuple[float, float]] = []  # (threshold, f_beta)
+        for t in np.linspace(0.05, 0.90, 86):
             pred = (score >= t).astype(int)
             tp = int(((pred == 1) & (y_true == 1)).sum())
             fp = int(((pred == 1) & (y_true == 0)).sum())
@@ -235,13 +297,16 @@ class DangerGate:
             prec = tp / max(tp + fp, 1)
             rec = tp / max(tp + fn, 1)
             if prec >= precision_min and rec >= recall_min:
-                candidates.append((float(t), rec, prec))
+                b2 = beta ** 2
+                f_beta = (1 + b2) * prec * rec / max(b2 * prec + rec, 1e-9)
+                candidates.append((float(t), f_beta))
 
         if candidates:
-            return max(candidates, key=lambda x: (x[1], x[2]))[0]
+            return max(candidates, key=lambda x: x[1])[0]
 
+        # Fallback: best F-beta ignoring constraints
         fallback: list[tuple[float, float]] = []
-        for t in np.arange(0.10, 0.85, 0.05):
+        for t in np.linspace(0.05, 0.90, 86):
             pred = (score >= t).astype(int)
             tp = int(((pred == 1) & (y_true == 1)).sum())
             fp = int(((pred == 1) & (y_true == 0)).sum())
@@ -249,7 +314,9 @@ class DangerGate:
             prec = tp / max(tp + fp, 1)
             rec = tp / max(tp + fn, 1)
             if prec >= 0.40:
-                fallback.append((float(t), rec))
+                b2 = beta ** 2
+                f_beta = (1 + b2) * prec * rec / max(b2 * prec + rec, 1e-9)
+                fallback.append((float(t), f_beta))
         return max(fallback, key=lambda x: x[1])[0] if fallback else default
 
     def predict_tier_proba(self, X: pd.DataFrame) -> np.ndarray:

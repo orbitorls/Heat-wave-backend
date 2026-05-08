@@ -13,7 +13,7 @@ import pytest
 from app.ml.forecast.features import build_features, get_feature_names, _DEFAULT_LAGS_H, _DEFAULT_ROLLING_H
 
 
-def _make_df(n_hours: int = 72, station_id: str = "BKK_01") -> pd.DataFrame:
+def _make_df(n_hours: int = 200, station_id: str = "BKK_01") -> pd.DataFrame:
     """Synthetic hourly weather data."""
     hours = pd.date_range("2024-05-01", periods=n_hours, freq="h", tz="UTC")
     temp = 30 + 5 * np.sin(2 * np.pi * np.arange(n_hours) / 24)
@@ -27,7 +27,7 @@ def _make_df(n_hours: int = 72, station_id: str = "BKK_01") -> pd.DataFrame:
 
 
 def test_build_features_returns_correct_shapes():
-    df = _make_df(72)
+    df = _make_df(200)
     X, y = build_features(df, horizon_h=6)
     assert len(X) == len(y), "X and y must have same length"
     assert len(X) > 0, "Must produce at least some feature rows"
@@ -45,7 +45,7 @@ def test_no_leakage():
 
     If lag_1h at row i contains value i+1 or higher, that's leakage.
     """
-    n = 60
+    n = 200
     hours = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
     df = pd.DataFrame({
         "ts_utc": hours,
@@ -94,7 +94,7 @@ def test_no_leakage():
 
 def test_y_is_future_heat_index():
     """Target y must be heat_index_c at t+horizon, not at t."""
-    df = _make_df(72)
+    df = _make_df(200)
     horizon_h = 6
     X, y = build_features(df, horizon_h=horizon_h)
     # y should vary (it's future heat_index) — not constant
@@ -102,7 +102,7 @@ def test_y_is_future_heat_index():
 
 
 def test_no_nan_in_output():
-    df = _make_df(72)
+    df = _make_df(200)
     X, y = build_features(df, horizon_h=6)
     assert not X.isna().any().any(), "X must contain no NaN values"
     assert not y.isna().any(), "y must contain no NaN values"
@@ -110,7 +110,7 @@ def test_no_nan_in_output():
 
 def test_feature_names_consistent():
     """get_feature_names() must return names that appear in X columns."""
-    df = _make_df(72)
+    df = _make_df(200)
     X, _ = build_features(df, horizon_h=6)
     expected = set(get_feature_names())
     actual = set(X.columns)
@@ -121,7 +121,7 @@ def test_feature_names_consistent():
 
 def test_v2_features_present():
     """All v2 feature additions must appear in X."""
-    n = 50
+    n = 200
     rng = np.random.default_rng(0)
     df = pd.DataFrame({
         "ts_utc": pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC"),
@@ -140,7 +140,8 @@ def test_v2_features_present():
 
 def test_multi_station_lags_and_targets_do_not_cross_station_boundaries():
     """Lag and target values must be computed within each station only."""
-    n = 40
+    # Need enough rows so lag168h is non-NaN: at least 169 rows per station.
+    n = 200
     hours = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
     station_a = pd.DataFrame({
         "ts_utc": hours,
@@ -163,30 +164,96 @@ def test_multi_station_lags_and_targets_do_not_cross_station_boundaries():
     first_station_a = X[X["station_enc"] == 0].iloc[0]
     first_station_b = X[X["station_enc"] == 1].iloc[0]
 
-    assert first_station_a["heat_index_c_lag1h"] == 23.0
-    assert first_station_a["heat_index_c_lag24h"] == 0.0
-    assert first_station_b["heat_index_c_lag1h"] == 1023.0
-    assert first_station_b["heat_index_c_lag24h"] == 1000.0
+    # First valid row per station is at per-station index 168 (lag168h NaN threshold)
+    assert first_station_a["heat_index_c_lag1h"] == 167.0
+    assert first_station_a["heat_index_c_lag24h"] == 144.0
+    assert first_station_b["heat_index_c_lag1h"] == 1167.0
+    assert first_station_b["heat_index_c_lag24h"] == 1144.0
 
     y_a = y[X["station_enc"] == 0].reset_index(drop=True)
     y_b = y[X["station_enc"] == 1].reset_index(drop=True)
-    assert y_a.iloc[0] == 30.0
-    assert y_b.iloc[0] == 1030.0
+    # Target is at per-station index 168+6=174
+    assert y_a.iloc[0] == 174.0
+    assert y_b.iloc[0] == 1174.0
+
+
+def test_truncation_invariance_no_future_data_changes_past_features():
+    """A5: Cutting df at time t must not change X values for rows <= t.
+
+    Method: build X on full df, then truncate df at t and rebuild.
+    Every feature column at common rows must match exactly.
+    This catches any rolling/expanding computation that accidentally
+    uses future rows (e.g. unshifted groupby aggregates).
+    """
+    n = 200
+    horizon_h = 6
+    hours = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    rng = np.random.default_rng(42)
+    df = pd.DataFrame({
+        "ts_utc": hours,
+        "station_id": "TEST",
+        "temp_c": 28.0 + rng.normal(0, 3, n),
+        "rh": 70.0 + rng.normal(0, 5, n),
+        "heat_index_c": 30.0 + rng.normal(0, 3, n),
+    })
+
+    # Build X on full df
+    X_full, _ = build_features(df, horizon_h=horizon_h)
+
+    # Truncate at midpoint and rebuild
+    cut = n // 2
+    df_cut = df.iloc[:cut].copy()
+    X_cut, _ = build_features(df_cut, horizon_h=horizon_h)
+
+    # Rows that appear in both: X_cut rows all have ts_utc <= df[cut-1].ts_utc
+    # The corresponding rows in X_full must be identical feature-by-feature.
+    common_cols = [c for c in X_cut.columns if c in X_full.columns]
+    ts_in_cut = set(df_cut["ts_utc"].astype(str))
+
+    # Align on ts_utc — find rows in X_full that correspond to X_cut rows
+    # Features store ts_utc in X.attrs, but we can match via lag values.
+    # Simpler: both X are sorted chronologically; X_cut rows are a prefix of X_full rows.
+    n_common = min(len(X_cut), len(X_full))
+    for col in common_cols:
+        if col == "station_enc":
+            continue  # encoding order may differ when df has only 1 station
+        full_vals = X_full[col].values[:n_common]
+        cut_vals = X_cut[col].values[:n_common]
+        np.testing.assert_array_almost_equal(
+            full_vals, cut_vals, decimal=6,
+            err_msg=f"Causality violation in feature '{col}': "
+                    f"truncating df changed past feature values (future data leaked in).",
+        )
+
+
+def test_physics_features_present():
+    """B1: dewpoint_c, vpd_kpa, and wbgt_stull_c lag columns must appear in X."""
+    df = _make_df(200)
+    X, _ = build_features(df, horizon_h=6)
+    for feat in ["dewpoint_c_lag1h", "vpd_kpa_lag1h", "wbgt_stull_c_lag1h"]:
+        assert feat in X.columns, f"Physics lag feature missing from X: {feat}"
+    # Raw (un-lagged) physics columns must NOT appear in X (causality guard)
+    for raw_col in ["dewpoint_c", "vpd_kpa", "wbgt_stull_c"]:
+        assert raw_col not in X.columns, (
+            f"Raw physics column {raw_col!r} found in X — must only appear as lagged"
+        )
 
 
 def test_extended_feature_fill_does_not_backfill_future_values():
     """Sparse extended features may forward-fill past values but must not backfill."""
-    n = 40
+    n = 200
     df = pd.DataFrame({
         "ts_utc": pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC"),
         "station_id": "A",
         "temp_c": np.arange(n, dtype=float),
         "rh": np.full(n, 60.0),
         "heat_index_c": np.arange(n, dtype=float),
-        "solar_wm2": [np.nan] * 5 + [50.0] * 35,
+        "solar_wm2": [np.nan] * 5 + [50.0] * 195,
     })
 
     X, _ = build_features(df, horizon_h=6)
 
+    # First valid X row is at per-station index 72 (lag72h NaN threshold).
+    # solar_wm2 was present from index 5, so after ffill and lag1h, value is 50.0.
     assert X["solar_wm2_lag1h"].iloc[0] == 50.0
     assert not (X["solar_wm2_lag1h"] == 0.0).any()

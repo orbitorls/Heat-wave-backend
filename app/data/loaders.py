@@ -1,10 +1,11 @@
 """Parquet I/O helpers for weather observations."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.dataset as ds
 
 from app.data.schemas import StationObservation
 
@@ -38,19 +39,39 @@ def read_observations(
     Returns DataFrame with columns matching StationObservation fields.
     Returns empty DataFrame if no data found.
     """
-    frames: list[pd.DataFrame] = []
-    current = start
-    while current <= end:
-        path = _partition_path(station_id, current)
-        if path.exists():
-            frames.append(pd.read_parquet(path, engine="pyarrow"))
-        current += timedelta(days=1)
-
-    if not frames:
+    if not _RAW_ROOT.exists():
         return pd.DataFrame()
 
-    frames = [f.dropna(axis=1, how="all") for f in frames]
-    df = pd.concat(frames, ignore_index=True)
+    try:
+        dataset = ds.dataset(_RAW_ROOT, format="parquet", partitioning="hive")
+        filt = (
+            (ds.field("station_id") == station_id)
+            & (ds.field("date") >= start.isoformat())
+            & (ds.field("date") <= end.isoformat())
+        )
+        table = dataset.to_table(filter=filt)
+        if table.num_rows == 0:
+            return pd.DataFrame()
+        df = table.to_pandas()
+    except Exception:
+        frames: list[pd.DataFrame] = []
+        station_dir = _RAW_ROOT / f"station_id={station_id}"
+        if not station_dir.exists():
+            return pd.DataFrame()
+        for path in station_dir.glob("date=*/obs.parquet"):
+            day_str = path.parent.name.removeprefix("date=")
+            try:
+                day = date.fromisoformat(day_str)
+            except ValueError:
+                continue
+            if start <= day <= end:
+                frames.append(pd.read_parquet(path, engine="pyarrow"))
+
+        frames = [f for f in frames if not f.empty]
+        if not frames:
+            return pd.DataFrame()
+        df = pd.concat(frames, ignore_index=True)
+    df = df.dropna(axis=1, how="all")
     if "ts_utc" in df.columns:
         df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True)
 

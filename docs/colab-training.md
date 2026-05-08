@@ -81,7 +81,7 @@ Set via the key icon in the Colab sidebar (Tools → Secrets) / ตั้งผ�
 
 1. Each `02_train_*.ipynb` writes intermediate artifacts to Drive **per (station, horizon)**. A timeout loses only the in-flight pair, not the whole sweep.
 2. On reconnect, re-run cells 1–3 of `00_setup.ipynb` (idempotent), then re-run the training cell — it skips `(station, horizon)` pairs that already have a `bundle.json` unless `--force` is passed.
-3. Optuna studies persist to `logs/optuna/{study}.db` in Drive; resume by passing the same `study_name` and `storage` URL.
+3. Optuna studies persist to `app/models/forecast_v3/optuna_studies.db` in Drive; re-running the same `(station, horizon, target)` resumes with `load_if_exists=True`.
 4. If the runtime hits an OOM, drop the `--trials` count or restrict to one `station_id` and rerun.
 5. As a last resort, download the partial Drive artifacts to local and finish training there.
 
@@ -89,9 +89,38 @@ Set via the key icon in the Colab sidebar (Tools → Secrets) / ตั้งผ�
 
 1. notebook ทุกตัวเซฟ artifact ลง Drive **ต่อ (สถานี, horizon)** — ถ้าโดนตัดจะเสียแค่คู่ที่กำลังเทรน ไม่ใช่ทั้งหมด.
 2. กลับเข้ามาใหม่ให้รัน cell 1–3 ของ `00_setup.ipynb` ใหม่ (idempotent) แล้วรัน cell train ต่อ — `(station, horizon)` ที่มี `bundle.json` แล้วจะถูกข้าม เว้นแต่ใส่ `--force`.
-3. study ของ Optuna จะถูกเก็บที่ `logs/optuna/{study}.db` บน Drive; resume ได้ด้วย `study_name` และ `storage` URL เดิม.
+3. study ของ Optuna จะถูกเก็บที่ `app/models/forecast_v3/optuna_studies.db` บน Drive; เมื่อรัน `(station, horizon, target)` เดิมจะ resume ให้เองด้วย `load_if_exists=True`.
 4. ถ้า OOM ลด `--trials` หรือจำกัดไว้แค่ `station_id` เดียวแล้วรันใหม่.
 5. ทางเลือกสุดท้าย: download artifact บางส่วนกลับลง local แล้วเทรนต่อบนเครื่องตัวเอง.
+
+## 4.1 Full-quality training command (GPU) / คำสั่งเทรนจริงแบบคุณภาพสูง
+
+**EN.** After `00_setup.ipynb` and (optionally) `01_ingest.ipynb`, run this in Colab:
+
+```bash
+%cd /content/Heat-wave-backend
+!bash scripts/colab_train_full.sh --trials 120 --device gpu --gate-backend brf
+```
+
+**TH.** หลังจากรัน `00_setup.ipynb` และ (ถ้าต้องการ) `01_ingest.ipynb` แล้ว ให้รันคำสั่งนี้ใน Colab:
+
+```bash
+%cd /content/Heat-wave-backend
+!bash scripts/colab_train_full.sh --trials 120 --device gpu --gate-backend brf
+```
+
+By default this is resume-safe: completed `(station, horizon)` slots are skipped automatically.  
+ค่า default รองรับการ resume: คู่ `(station, horizon)` ที่เสร็จแล้วจะถูกข้ามอัตโนมัติ.
+
+Use `--force` only when you intentionally want to retrain completed slots.  
+ใช้ `--force` เฉพาะเมื่อจงใจ retrain slot เดิม.
+
+Performance notes:
+
+- GPU mode forces `--workers 1` and `LGBM_PARALLEL_BOOSTERS=1` to avoid Colab GPU memory contention.
+- CPU mode can use `--workers N` across stations and `--parallel-boosters N` within a station, but avoid setting both high at the same time.
+- Persistent Optuna studies are capped by `--trials`: rerunning `--trials 120` reuses existing complete trials and only fills missing trials, instead of adding 120 more.
+- Use `LGBM_N_JOBS=N` only when you need explicit per-booster CPU thread control.
 
 ## 5. Push-back workflow: Drive → repo → `app/models/forecast_v3/`
 

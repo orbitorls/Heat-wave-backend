@@ -6,14 +6,27 @@ No future values are ever used in X.
 """
 from __future__ import annotations
 from typing import Literal, Sequence
+import hashlib as _hashlib
 import numpy as np
 import pandas as pd
 
 from app.data.stations import STATIONS
 
 
-_DEFAULT_LAGS_H = [1, 3, 6, 12, 24]
+_DEFAULT_LAGS_H = [1, 3, 6, 12, 24, 48, 72, 168]
 _DEFAULT_ROLLING_H = [3, 6, 24]
+
+# 3-entry LRU feature cache — keyed by (df hash, horizon_h)
+_FEATURE_CACHE: dict = {}
+_FEATURE_CACHE_ORDER: list = []
+_FEATURE_CACHE_MAX = 3
+
+
+def _feature_cache_key(df: pd.DataFrame, horizon_h: int) -> str:
+    h = _hashlib.md5(
+        pd.util.hash_pandas_object(df, index=True).values.tobytes()
+    ).hexdigest()[:16]
+    return f"{h}_{horizon_h}"
 
 
 def add_heat_index_col(df: pd.DataFrame) -> pd.DataFrame:
@@ -72,6 +85,33 @@ def build_X_once(
 
     df = df.sort_values(["station_id", "ts_utc"]).reset_index(drop=True)
     station_group = df.groupby("station_id", sort=False)
+
+    # --- B1: Physics features (computed per-row from current values, then lagged) ---
+    # Magnus formula → dew-point (causal: uses only current row's temp_c and rh)
+    _a_mag, _b_mag = 17.625, 243.04
+    _gamma = (
+        np.log(np.clip(df["rh"] / 100.0, 1e-9, 1.0))
+        + _a_mag * df["temp_c"] / (_b_mag + df["temp_c"])
+    )
+    df["dewpoint_c"] = _b_mag * _gamma / (_a_mag - _gamma)
+
+    # Vapour Pressure Deficit (kPa)
+    _es = 0.6108 * np.exp(17.27 * df["temp_c"] / (df["temp_c"] + 237.3))
+    df["vpd_kpa"] = _es * (1.0 - np.clip(df["rh"] / 100.0, 0.0, 1.0))
+
+    # Stull (2011) wet-bulb approximation
+    _T, _R = df["temp_c"], np.clip(df["rh"], 0.0, 100.0)
+    df["wbgt_stull_c"] = (
+        _T * np.arctan(0.151977 * np.sqrt(_R + 8.313659))
+        + np.arctan(_T + _R)
+        - np.arctan(_R - 1.676331)
+        + 0.00391838 * _R ** 1.5 * np.arctan(0.023101 * _R)
+        - 4.686035
+    )
+    # NOTE: dewpoint_c, vpd_kpa, wbgt_stull_c are computed from current-row values
+    # (causal). They will be lagged below (shift >= 1) and MUST NOT appear as
+    # un-lagged raw columns in the output feature matrix X.
+
     df["hour"] = df["ts_utc"].dt.hour
     df["day_of_year"] = df["ts_utc"].dt.day_of_year
     df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
@@ -99,39 +139,53 @@ def build_X_once(
             lambda sid: STATIONS[sid].elevation_m if sid in STATIONS else 0.0
         )
 
-    # Lag features — shift FORWARD in the index (shift(n) uses past values)
-    for col in ["heat_index_c", "temp_c", "rh"]:
+    # Lag features — native GroupBy.shift avoids Python-level lambda overhead
+    _sid = df["station_id"]
+    # B4: lag 168h added; B1: dewpoint_c, wbgt_stull_c, and vpd_kpa lagged alongside core vars
+    for col in ["heat_index_c", "temp_c", "rh", "dewpoint_c", "wbgt_stull_c", "vpd_kpa"]:
+        grp = station_group[col]
         for lag in lags_h:
-            df[f"{col}_lag{lag}h"] = station_group[col].transform(lambda s, lag=lag: s.shift(lag))
+            df[f"{col}_lag{lag}h"] = grp.shift(lag)
 
     # Cooling-rate features — difference over a 3-hour window using past values only
-    df["hi_change_3h"] = station_group["heat_index_c"].transform(lambda s: s.shift(1) - s.shift(4))
-    df["temp_change_3h"] = station_group["temp_c"].transform(lambda s: s.shift(1) - s.shift(4))
+    _hi_grp = station_group["heat_index_c"]
+    _tc_grp = station_group["temp_c"]
+    df["hi_change_3h"] = _hi_grp.shift(1) - _hi_grp.shift(4)
+    df["temp_change_3h"] = _tc_grp.shift(1) - _tc_grp.shift(4)
 
-    # Rolling features — on the already-shifted columns to avoid leakage
-    # Rolling window of size w at position i uses rows [i-w+1 .. i] — past only
-    for col in ["heat_index_c", "temp_c"]:
+    # Rolling features — on the already-shifted series to avoid leakage.
+    # GroupBy.shift returns a flat Series; re-group by station_id for rolling.
+    # B2: rh and dewpoint_c added to rolling cols
+    for col in ["heat_index_c", "temp_c", "rh", "dewpoint_c"]:
+        shifted = station_group[col].shift(1)
+        grp_shifted = shifted.groupby(_sid, sort=False)
         for w in rolling_h:
-            df[f"{col}_roll{w}h_mean"] = station_group[col].transform(
-                lambda s, w=w: s.shift(1).rolling(w, min_periods=1).mean()
+            df[f"{col}_roll{w}h_mean"] = (
+                grp_shifted.rolling(w, min_periods=1).mean().reset_index(level=0, drop=True)
             )
-            df[f"{col}_roll{w}h_std"] = station_group[col].transform(
-                lambda s, w=w: s.shift(1).rolling(w, min_periods=1).std().fillna(0)
+            df[f"{col}_roll{w}h_std"] = (
+                grp_shifted.rolling(w, min_periods=1).std().fillna(0).reset_index(level=0, drop=True)
             )
+
+    # B2: temp_range_24h — 24h rolling max minus min, shifted by 1 for causality
+    df["temp_range_24h"] = (
+        df.groupby("station_id")["temp_c"]
+        .transform(
+            lambda x: (
+                x.rolling(24, min_periods=1).max()
+                - x.rolling(24, min_periods=1).min()
+            ).shift(1)
+        )
+    )
 
     # Core interaction feature — uses shift(1) to avoid leakage
-    df["temp_x_rh"] = (
-        station_group["temp_c"].transform(lambda s: s.shift(1))
-        * station_group["rh"].transform(lambda s: s.shift(1))
-    )
+    _tc_lag1 = station_group["temp_c"].shift(1)
+    df["temp_x_rh"] = _tc_lag1 * station_group["rh"].shift(1)
 
     # Evening-peak interaction — captures high-temp risk during 16:00–20:00 local time
     local_hour_num = (df["ts_utc"].dt.hour + 7) % 24
     evening_mask = ((local_hour_num >= 16) & (local_hour_num <= 20)).astype(float)
-    df["temp_x_evening"] = (
-        station_group["temp_c"].transform(lambda s: s.shift(1))
-        * evening_mask
-    )
+    df["temp_x_evening"] = _tc_lag1 * evening_mask
 
     # Extended atmospheric features — included when the column is present AND
     # at least 30% non-null. Missing values are forward-filled then backfilled
@@ -146,18 +200,17 @@ def build_X_once(
             continue  # not enough data to be useful
         # Forward-fill gaps within station only. Do not backfill: that would use
         # future observations to fill earlier feature rows.
-        df[col] = station_group[col].transform(lambda s: s.ffill())
+        df[col] = station_group[col].ffill()
         for lag in _EXTENDED_LAGS:
-            df[f"{col}_lag{lag}h"] = station_group[col].transform(lambda s, lag=lag: s.shift(lag))
+            df[f"{col}_lag{lag}h"] = station_group[col].shift(lag)
         # Rolling mean for solar (captures day trend) + solar-temp interaction
         if col == "solar_wm2":
-            df["solar_wm2_roll6h_mean"] = station_group[col].transform(
-                lambda s: s.shift(1).rolling(6, min_periods=1).mean()
+            sol_shifted = station_group[col].shift(1)
+            df["solar_wm2_roll6h_mean"] = (
+                sol_shifted.groupby(_sid, sort=False).rolling(6, min_periods=1).mean()
+                .reset_index(level=0, drop=True)
             )
-            df["temp_x_solar"] = (
-                station_group["temp_c"].transform(lambda s: s.shift(1))
-                * station_group[col].transform(lambda s: s.shift(1))
-            )
+            df["temp_x_solar"] = _tc_lag1 * sol_shifted
 
     # Wind and precipitation features — included when present AND ≥20% non-null.
     # Shorter lag set since these are typically sparser than core met variables.
@@ -169,9 +222,9 @@ def build_X_once(
         fill_rate = df[col].notna().mean()
         if fill_rate < 0.20:
             continue  # too sparse
-        df[col] = station_group[col].transform(lambda s: s.ffill())
+        df[col] = station_group[col].ffill()
         for lag in _WIND_PRECIP_LAGS:
-            df[f"{col}_lag{lag}h"] = station_group[col].transform(lambda s, lag=lag: s.shift(lag))
+            df[f"{col}_lag{lag}h"] = station_group[col].shift(lag)
 
     # Always ensure lag columns exist for consistency with get_feature_names().
     # Filled with 0 when the source column was absent or too sparse.
@@ -192,14 +245,36 @@ def build_X_once(
     bucket = df.groupby(["station_id", "month", "hour"], sort=False)["heat_index_c"]
     df["_hi_clim"] = bucket.transform(lambda s: s.expanding(min_periods=1).mean())
     df["hi_residual_lag1h"] = (
-        station_group["heat_index_c"].transform(lambda s: s.shift(1))
-        - station_group["_hi_clim"].transform(lambda s: s.shift(1))
+        station_group["heat_index_c"].shift(1)
+        - station_group["_hi_clim"].shift(1)
     )
 
+    # Target-time climatology — causal expanding mean of heat_index_c at the
+    # (station, target_month, target_hour) bucket for each forecast horizon.
+    # B3: Extended to include h24/h48/h72 in addition to h6/h12 so that all
+    # trained horizons benefit from target-time climatology context.
+    # Causal invariant: the expanding mean at row t uses only rows with ts_utc <= t
+    # in that bucket, because rows are sorted by (station_id, ts_utc) above.
+    _TARGET_HORIZONS = [6, 12, 24, 48, 72]
+    for _h in _TARGET_HORIZONS:
+        _target_ts = df["ts_utc"] + pd.Timedelta(hours=_h)
+        _t_hour_col = f"_th{_h}_hour"
+        _t_month_col = f"_th{_h}_month"
+        df[_t_hour_col] = _target_ts.dt.hour
+        df[_t_month_col] = _target_ts.dt.month
+        _tbucket = df.groupby(["station_id", _t_month_col, _t_hour_col], sort=False)["heat_index_c"]
+        df[f"target_h{_h}_hi_clim"] = _tbucket.transform(lambda s: s.expanding(min_periods=1).mean())
+        df[f"target_h{_h}_hour_sin"] = np.sin(2 * np.pi * df[_t_hour_col] / 24)
+        df[f"target_h{_h}_hour_cos"] = np.cos(2 * np.pi * df[_t_hour_col] / 24)
+        df.drop(columns=[_t_hour_col, _t_month_col], inplace=True)
+
     # Columns excluded from X (identifiers, raw targets, or now-promoted wind/precip
-    # that appear only through their lag derivatives)
+    # that appear only through their lag derivatives).
+    # Physics intermediates (dewpoint_c, vpd_kpa, wbgt_stull_c) are excluded here
+    # because they are current-row values — only their lagged versions belong in X.
     _NON_FEATURE = {"ts_utc", "station_id", "heat_index_c", "temp_c", "rh",
-                    "hour", "day_of_year", "local_hour", "source"}
+                    "hour", "day_of_year", "local_hour", "source",
+                    "dewpoint_c", "vpd_kpa", "wbgt_stull_c"}
     feature_cols = [
         c for c in df.columns
         if c not in _NON_FEATURE and pd.api.types.is_numeric_dtype(df[c])
@@ -260,11 +335,11 @@ def build_y_for_horizon(
 
     if target_kind == "th":
         y_full = pd.DataFrame({
-            "temp_c": station_group["temp_c"].transform(lambda s: s.shift(-horizon_h)),
-            "rh": station_group["rh"].transform(lambda s: s.shift(-horizon_h)),
+            "temp_c": station_group["temp_c"].shift(-horizon_h),
+            "rh": station_group["rh"].shift(-horizon_h),
         })
     else:
-        y_full = station_group["heat_index_c"].transform(lambda s: s.shift(-horizon_h))
+        y_full = station_group["heat_index_c"].shift(-horizon_h)
 
     # df_augmented has a 0..N-1 RangeIndex (from build_X_once's reset_index).
     # X_valid_index contains label values from that same range, so .loc selects
@@ -284,6 +359,8 @@ def build_features(
     """Build lag + rolling features for XGBoost heat-index forecast.
 
     Backward-compatible wrapper around build_X_once + build_y_for_horizon.
+    Results are cached with a 3-entry LRU so multiple backends training on the
+    same station share the computed feature matrix without recomputation.
 
     Args:
         df: DataFrame with columns ts_utc (datetime, UTC), station_id,
@@ -301,10 +378,32 @@ def build_features(
     data from df rows with ts_utc <= df.ts_utc[i]. The target y[i] uses
     df.ts_utc[i + horizon_h]. No leakage.
     """
+    # F2: 3-entry LRU cache keyed by (df content hash, horizon_h).
+    # Only cache when using default lags/rolling to avoid key explosion.
+    _use_cache = (lags_h == _DEFAULT_LAGS_H and rolling_h == _DEFAULT_ROLLING_H
+                  and target_kind == "hi")
+    if _use_cache:
+        _ckey = _feature_cache_key(df, horizon_h)
+        if _ckey in _FEATURE_CACHE:
+            # Move to most-recently-used position
+            _FEATURE_CACHE_ORDER.remove(_ckey)
+            _FEATURE_CACHE_ORDER.append(_ckey)
+            return _FEATURE_CACHE[_ckey]
+
     X, df_aug = build_X_once(df, lags_h, rolling_h)
     y = build_y_for_horizon(df_aug, X.index, horizon_h, target_kind)
     valid = y.notna().all(axis=1) if isinstance(y, pd.DataFrame) else y.notna()
-    return X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
+    result = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
+
+    if _use_cache:
+        _FEATURE_CACHE[_ckey] = result
+        _FEATURE_CACHE_ORDER.append(_ckey)
+        # Evict LRU entry when over capacity
+        while len(_FEATURE_CACHE_ORDER) > _FEATURE_CACHE_MAX:
+            _evict = _FEATURE_CACHE_ORDER.pop(0)
+            _FEATURE_CACHE.pop(_evict, None)
+
+    return result
 
 
 def get_feature_names(
@@ -317,13 +416,17 @@ def get_feature_names(
         # Station geometry — always present (filled with 0.0 for unknown stations)
         "lat", "lon", "elevation_m",
     ]
-    for col in ["heat_index_c", "temp_c", "rh"]:
+    # Core lags: heat_index_c, temp_c, rh (B1/B4: also dewpoint_c, wbgt_stull_c, vpd_kpa)
+    for col in ["heat_index_c", "temp_c", "rh", "dewpoint_c", "wbgt_stull_c", "vpd_kpa"]:
         for lag in lags_h:
             names.append(f"{col}_lag{lag}h")
-    for col in ["heat_index_c", "temp_c"]:
+    # Rolling: heat_index_c, temp_c (B2: also rh and dewpoint_c)
+    for col in ["heat_index_c", "temp_c", "rh", "dewpoint_c"]:
         for w in rolling_h:
             names.append(f"{col}_roll{w}h_mean")
             names.append(f"{col}_roll{w}h_std")
+    # B2: temp_range_24h scalar feature
+    names.append("temp_range_24h")
     # v2 features — always present regardless of extended column availability
     names += [
         "local_hour_sin", "local_hour_cos",
@@ -337,4 +440,11 @@ def get_feature_names(
         "wind_ms_lag1h", "wind_ms_lag3h",
         "precip_mm_lag1h", "precip_mm_lag3h",
     ]
+    # Target-time climatology — B3: extended to all five horizons.
+    for _h in [6, 12, 24, 48, 72]:
+        names += [
+            f"target_h{_h}_hi_clim",
+            f"target_h{_h}_hour_sin",
+            f"target_h{_h}_hour_cos",
+        ]
     return names

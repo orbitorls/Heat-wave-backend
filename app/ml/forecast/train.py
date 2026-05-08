@@ -33,6 +33,7 @@ from app.ml.forecast.splitting import (
     split_xy,
     time_series_cv_splits,
 )
+from app.ml.forecast._optuna_utils import feature_signature, forecast_model_root, write_heartbeat
 
 logger = logging.getLogger(__name__)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -104,33 +105,51 @@ def _make_sample_weight(y: np.ndarray) -> np.ndarray:
     return 1.0 + 4.0 * (y > 38).astype(float) + 8.0 * (y > 42).astype(float)
 
 
-def _objective(trial: optuna.Trial, X: pd.DataFrame, y: pd.Series, horizon_h: int) -> float:
+def _make_xgb_cv_folds(
+    X: pd.DataFrame,
+    y: pd.Series,
+    horizon_h: int,
+) -> list[tuple[xgb.DMatrix, xgb.DMatrix, np.ndarray]]:
+    X_arr = X.values
+    y_arr = y.values
+    names = list(X.columns)
+    folds: list[tuple[xgb.DMatrix, xgb.DMatrix, np.ndarray]] = []
+    for train_idx, val_idx in time_series_cv_splits(X, horizon_h=horizon_h, n_splits=5):
+        yt = y_arr[train_idx]
+        yv = y_arr[val_idx]
+        dtr = xgb.DMatrix(
+            X_arr[train_idx],
+            label=yt,
+            weight=_make_sample_weight(yt),
+            feature_names=names,
+        )
+        dval = xgb.DMatrix(X_arr[val_idx], label=yv, feature_names=names)
+        folds.append((dtr, dval, yv))
+    return folds
+
+
+def _objective(trial: optuna.Trial, cv_folds: list[tuple[xgb.DMatrix, xgb.DMatrix, np.ndarray]]) -> float:
     params = {
         **_gpu_xgb_params(),
         "objective": "reg:squarederror",
         "eval_metric": "mae",
-        "max_depth": trial.suggest_int("max_depth", 3, 10),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        "max_depth": trial.suggest_int("max_depth", 3, 12),
+        "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
+        "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+        "colsample_bylevel": trial.suggest_float("colsample_bylevel", 0.5, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
+        "max_delta_step": trial.suggest_float("max_delta_step", 0.0, 5.0),
         "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
         "gamma": trial.suggest_float("gamma", 0.0, 5.0),
         "seed": 42,
         "verbosity": 0,
     }
-    n_estimators = trial.suggest_int("n_estimators", 200, 1500)
+    n_estimators = trial.suggest_int("n_estimators", 200, 2000)
 
     maes: list[float] = []
-    X_arr = X.values
-    y_arr = y.values
-    for k, (train_idx, val_idx) in enumerate(time_series_cv_splits(X, horizon_h=horizon_h, n_splits=5)):
-        Xt, Xv = X_arr[train_idx], X_arr[val_idx]
-        yt, yv = y_arr[train_idx], y_arr[val_idx]
-        sw_t = _make_sample_weight(yt)
-        dtr = xgb.DMatrix(Xt, label=yt, weight=sw_t, feature_names=list(X.columns))
-        dval = xgb.DMatrix(Xv, label=yv, feature_names=list(X.columns))
+    for k, (dtr, dval, yv) in enumerate(cv_folds):
         bst = xgb.train(
             params, dtr,
             num_boost_round=n_estimators,
@@ -181,17 +200,47 @@ def train(
     logger.info("Train rows=%d, Val rows=%d, Test rows=%d", len(X_train), len(X_val), len(X_test))
 
     # --- Optuna hyperparameter search on mean objective ---
+    cv_folds = _make_xgb_cv_folds(X_train, y_train, horizon_h)
     sampler = optuna.samplers.TPESampler(seed=random_state)
-    study = optuna.create_study(
-        direction="minimize",
-        sampler=sampler,
-        pruner=optuna.pruners.HyperbandPruner(min_resource=2, max_resource=5, reduction_factor=3),
-    )
+    storage_path = forecast_model_root() / "optuna_studies.db"
+    storage_path.parent.mkdir(parents=True, exist_ok=True)
+    storage = f"sqlite:///{storage_path.as_posix()}?check_same_thread=False"
+    study_name = f"xgb_{station_id}_h{horizon_h}_{feature_signature(list(X_train.columns))}"
+    try:
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=sampler,
+            pruner=optuna.pruners.HyperbandPruner(min_resource=64, max_resource=2000, reduction_factor=3),
+            study_name=study_name,
+            storage=storage,
+            load_if_exists=True,
+        )
+    except Exception as exc:
+        logger.warning("XGBoost Optuna storage unavailable (%s). Falling back to in-memory study.", exc)
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=sampler,
+            pruner=optuna.pruners.HyperbandPruner(min_resource=64, max_resource=2000, reduction_factor=3),
+        )
 
     def objective(trial: optuna.Trial) -> float:
-        return _objective(trial, X_train, y_train, horizon_h)
+        return _objective(trial, cv_folds)
 
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    run_id = os.environ.get("HEATSHIELD_RUN_ID")
+
+    def _heartbeat_cb(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        write_heartbeat(
+            run_id,
+            current_slot=f"{station_id}:h{horizon_h}",
+            phase="tune",
+            trials_done=sum(t.state.name == "COMPLETE" for t in study.trials),
+        )
+
+    n_remaining = max(0, n_trials - sum(t.state.name == "COMPLETE" for t in study.trials))
+    if n_remaining > 0:
+        study.optimize(objective, n_trials=n_remaining, show_progress_bar=False, callbacks=[_heartbeat_cb])
+    else:
+        logger.info("Optuna study already has %d complete trials; reusing best params", n_trials)
     best_params = study.best_params
     best_params.update({"seed": random_state, "verbosity": 0})
     n_estimators = best_params.pop("n_estimators", 300)
@@ -230,13 +279,16 @@ def train(
 
     # --- Train all 9 boosters (3 roles × 3 seeds) on full trainval ---
     all_boosters: dict[str, list[xgb.Booster]] = {"mean": [], "q05": [], "q95": []}
+    d_tv = xgb.DMatrix(
+        X_trainval.values,
+        label=y_trainval.values,
+        weight=sw_trainval,
+        feature_names=list(X.columns),
+    )
 
     for seed in _SEEDS:
         for role, extra_params in _ROLES.items():
             params = {**_gpu_xgb_params(), **best_params, **extra_params, "seed": seed, "verbosity": 0}
-            sw = sw_trainval
-            d_tv = xgb.DMatrix(X_trainval.values, label=y_trainval.values, weight=sw,
-                                feature_names=list(X.columns))
             booster = xgb.train(
                 params,
                 d_tv,

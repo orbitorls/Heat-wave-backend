@@ -33,10 +33,12 @@ def forecast_heat_index(req: ForecastRequest) -> ForecastResponse:
     # Load from parquet if not provided
     if recent_obs is None:
         today = date.today()
-        yesterday = today - timedelta(days=1)
+        # Pull 3 days to ensure we have 48+ hours of recent observations
+        # (predict() requires max(lags_h)+2 = 26 minimum)
+        start = today - timedelta(days=3)
         try:
             import pandas as pd
-            df = read_observations(req.station_id, yesterday, today)
+            df = read_observations(req.station_id, start, today)
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"Failed to load observations: {exc}")
 
@@ -51,17 +53,18 @@ def forecast_heat_index(req: ForecastRequest) -> ForecastResponse:
 
         from app.data.schemas import StationObservation as SO
         import pandas as pd
+        df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True)
         recent_obs = [
             SO(
                 station_id=req.station_id,
-                ts_utc=row["ts_utc"].to_pydatetime() if hasattr(row["ts_utc"], "to_pydatetime") else row["ts_utc"],
-                temp_c=float(row["temp_c"]),
-                rh=float(row["rh"]),
-                wind_ms=float(row["wind_ms"]) if row.get("wind_ms") is not None and str(row.get("wind_ms")) != "nan" else None,
-                precip_mm=float(row["precip_mm"]) if row.get("precip_mm") is not None and str(row.get("precip_mm")) != "nan" else None,
+                ts_utc=row.ts_utc,
+                temp_c=float(row.temp_c),
+                rh=float(row.rh),
+                wind_ms=float(row.wind_ms) if row.wind_ms is not None and str(row.wind_ms) != "nan" else None,
+                precip_mm=float(row.precip_mm) if row.precip_mm is not None and str(row.precip_mm) != "nan" else None,
                 source="cache",
             )
-            for _, row in df.iterrows()
+            for row in df.itertuples(index=False)
         ]
 
     try:

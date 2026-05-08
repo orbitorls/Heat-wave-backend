@@ -220,7 +220,9 @@ def test_truncation_invariance_no_future_data_changes_past_features():
     difference proves the builder used data from rows after T_i when
     computing it on the full series.
     """
-    n = 200
+    # n must be > 168 + some buffer so that truncate_at-1 >= max(lags_h)=168
+    # and the truncated df also has >= 169 rows to produce valid X rows.
+    n = 250
     rng = np.random.default_rng(42)
     # Realistic-but-noisy HI/temp/rh sequence so rolling/std/interaction
     # features actually vary between rows.
@@ -235,7 +237,7 @@ def test_truncation_invariance_no_future_data_changes_past_features():
         "heat_index_c": hi,
     })
 
-    truncate_at = 150  # keep rows 0..149, drop 150..199 (the "future")
+    truncate_at = 185  # keep rows 0..184, drop 185..249 (the "future")
     df_truncated = df_full.iloc[:truncate_at].copy()
 
     X_full, df_aug_full = build_X_once(df_full)

@@ -122,25 +122,37 @@ class MondianCQRCalibrator:
         """
         self.alpha = alpha
         scores = np.maximum(y_lower - y_true, y_true - y_upper)
-        hour_bins = np.asarray(local_hours, dtype=int) // 6
+        hour_bins_fine = np.asarray(local_hours, dtype=int) // 3
+        hour_bins_coarse = np.asarray(local_hours, dtype=int) // 6
         tiers = np.zeros(len(scores), dtype=int) if danger_tiers is None else np.asarray(danger_tiers, dtype=int)
 
-        # Global fallback
         n = len(y_true)
         level = min(1.0, np.ceil((n + 1) * (1 - alpha)) / n)
         self._global_q = float(np.quantile(scores, level))
 
-        # Per-stratum
         station_arr = np.asarray(station_ids)
-        unique_strata = set(zip(station_arr, hour_bins, tiers))
-        for sid, hbin, tier in unique_strata:
-            mask = (station_arr == sid) & (hour_bins == hbin) & (tiers == tier)
+
+        # Coarse strata (// 6, 4 bins) — always computed
+        unique_coarse = set(zip(station_arr, hour_bins_coarse, tiers))
+        for sid, hbin, tier in unique_coarse:
+            mask = (station_arr == sid) & (hour_bins_coarse == hbin) & (tiers == tier)
             s = scores[mask]
             n_s = len(s)
             if n_s < 10:
-                continue  # too few samples — rely on global fallback
+                continue
             lv = min(1.0, np.ceil((n_s + 1) * (1 - alpha)) / n_s)
-            self._stratum_q[(str(sid), int(hbin), int(tier))] = float(np.quantile(s, lv))
+            self._stratum_q[(str(sid), f"c{int(hbin)}", int(tier))] = float(np.quantile(s, lv))
+
+        # Fine strata (// 3, 8 bins) — only when n_s >= 30
+        unique_fine = set(zip(station_arr, hour_bins_fine, tiers))
+        for sid, hbin, tier in unique_fine:
+            mask = (station_arr == sid) & (hour_bins_fine == hbin) & (tiers == tier)
+            s = scores[mask]
+            n_s = len(s)
+            if n_s < 30:
+                continue
+            lv = min(1.0, np.ceil((n_s + 1) * (1 - alpha)) / n_s)
+            self._stratum_q[(str(sid), f"f{int(hbin)}", int(tier))] = float(np.quantile(s, lv))
 
         return self
 
@@ -155,16 +167,43 @@ class MondianCQRCalibrator:
         """Apply per-stratum q_hat. Falls back to global for unseen strata."""
         y_lower = np.asarray(y_lower, dtype=float).copy()
         y_upper = np.asarray(y_upper, dtype=float).copy()
-        hour_bins = np.asarray(local_hours, dtype=int) // 6
+        station_arr = np.asarray(station_ids, dtype=str)
         tiers = np.zeros(len(y_lower), dtype=int) if danger_tiers is None else np.asarray(danger_tiers, dtype=int)
 
-        for i, (sid, hbin, tier) in enumerate(zip(station_ids, hour_bins, tiers)):
-            key = (str(sid), int(hbin), int(tier))
-            q = self._stratum_q.get(key, self._global_q)
-            y_lower[i] -= q
-            y_upper[i] += q
+        hour_bins_fine = (np.asarray(local_hours, dtype=int) // 3).astype(int)
+        hour_bins_coarse = (np.asarray(local_hours, dtype=int) // 6).astype(int)
 
-        return y_lower, y_upper
+        # Build lookup keys: fine then coarse then global fallback
+        # Use numpy unique for efficiency
+        fine_key_strs = np.array([
+            f"{s}|f{hf}|{t}" for s, hf, t in zip(station_arr, hour_bins_fine, tiers)
+        ])
+        coarse_key_strs = np.array([
+            f"{s}|c{hc}|{t}" for s, hc, t in zip(station_arr, hour_bins_coarse, tiers)
+        ])
+
+        unique_fine, inv_fine = np.unique(fine_key_strs, return_inverse=True)
+        unique_coarse, inv_coarse = np.unique(coarse_key_strs, return_inverse=True)
+
+        def _parse_key(k: str) -> tuple:
+            p = k.split("|")
+            return (p[0], p[1], int(p[2]))
+
+        coarse_table = np.array([
+            self._stratum_q.get(_parse_key(k), self._global_q) for k in unique_coarse
+        ])
+        q_vec = coarse_table[inv_coarse]
+
+        # Fine overrides where available
+        for i, fk in enumerate(unique_fine):
+            fkey = _parse_key(fk)
+            if fkey in self._stratum_q:
+                mask = inv_fine == i
+                q_vec[mask] = self._stratum_q[fkey]
+
+        # D3: allow up to 0.5°C tightening (was max(q, 0))
+        q_vec = np.maximum(q_vec, -0.5)
+        return y_lower - q_vec, y_upper + q_vec
 
     # ------------------------------------------------------------------
     # Serialisation — same pattern as EnbPICalibrator
@@ -186,10 +225,11 @@ class MondianCQRCalibrator:
         for k, v in d.get("stratum_q", {}).items():
             parts = k.split("|")
             if len(parts) == 3:
-                obj._stratum_q[(parts[0], int(parts[1]), int(parts[2]))] = float(v)
+                # parts[1] may be "f3", "c1" (new) or "2" (old numeric, backward compat)
+                obj._stratum_q[(parts[0], parts[1], int(parts[2]))] = float(v)
             else:
-                # Backward compatibility with older (station|hour_bin) artifacts.
-                obj._stratum_q[(parts[0], int(parts[1]), 0)] = float(v)
+                # Very old 2-part key
+                obj._stratum_q[(parts[0], parts[1], 0)] = float(v)
         return obj
 
     def save(self, path: Path) -> None:

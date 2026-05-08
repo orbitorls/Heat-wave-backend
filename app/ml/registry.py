@@ -36,6 +36,7 @@ v2 multi-horizon layout (per-horizon subdirectories):
 """
 from __future__ import annotations
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -345,7 +346,15 @@ def load_latest(kind: Literal["forecast"], horizon: int | None = None) -> dict:
 # v3 — model-agnostic registry (add after existing functions)
 # ---------------------------------------------------------------
 
-_V3_DIR = Path(__file__).parents[2] / "app" / "models" / "forecast_v3"
+def _v3_root() -> Path:
+    """Return active v3-compatible registry root.
+
+    Defaults to forecast_v3. Training can set HEATSHIELD_FORECAST_VERSION=v4
+    to write a parallel artifact tree without changing API runtime defaults.
+    """
+    version = os.environ.get("HEATSHIELD_FORECAST_VERSION", "v3").strip() or "v3"
+    version = version.removeprefix("forecast_")
+    return Path(__file__).parents[2] / "app" / "models" / f"forecast_{version}"
 
 
 def save_model_v3(
@@ -364,7 +373,8 @@ def save_model_v3(
             bundle.json    ← metadata + backend_name
             <backend-specific files written by forecaster.save()>
     """
-    slot_dir = _V3_DIR / station_id / f"h{horizon_h}"
+    root = _v3_root()
+    slot_dir = root / station_id / f"h{horizon_h}"
     slot_dir.mkdir(parents=True, exist_ok=True)
 
     # Write backend artifacts
@@ -384,7 +394,7 @@ def save_model_v3(
     (slot_dir / "registry.json").write_text(json.dumps(registry_meta, indent=2, default=str))
 
     # Update choice_matrix.json
-    matrix_path = _V3_DIR / "choice_matrix.json"
+    matrix_path = root / "choice_matrix.json"
     matrix = {}
     if matrix_path.exists():
         matrix = json.loads(matrix_path.read_text())
@@ -404,7 +414,7 @@ def load_latest_v3(station_id: str, horizon_h: int):
 
     Raises FileNotFoundError if no v3 model exists for this (station, horizon).
     """
-    slot_dir = _V3_DIR / station_id / f"h{horizon_h}"
+    slot_dir = _v3_root() / station_id / f"h{horizon_h}"
     bundle_path = slot_dir / "bundle.json"
     if not bundle_path.exists():
         raise FileNotFoundError(f"No v3 model found at {slot_dir}")
@@ -432,7 +442,7 @@ def load_latest_v3(station_id: str, horizon_h: int):
 
 def list_v3_models() -> dict:
     """Return the choice_matrix.json content or empty dict if no v3 models exist."""
-    matrix_path = _V3_DIR / "choice_matrix.json"
+    matrix_path = _v3_root() / "choice_matrix.json"
     if not matrix_path.exists():
         return {}
     return json.loads(matrix_path.read_text())
