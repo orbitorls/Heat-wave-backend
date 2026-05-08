@@ -147,14 +147,18 @@ class DangerGate:
         }
         sample_weight = np.array([class_weight[int(cls)] for cls in y_tier], dtype=float)
 
+        # Gate Optuna search uses CPU regardless of main device: the val_cal
+        # dataset is small (~3k rows) and GPU triggers tree-learner assertion
+        # failures (best_split_info.left_count == 0) on small multiclass data.
+        optuna_device = "cpu"
         base_params = {
             "objective": "multiclass",
             "num_class": 3,
             "metric": "multi_logloss",
             "seed": random_state,
             "verbose": -1,
-            "device_type": device,
-            **({"n_jobs": _training_n_jobs()} if device == "cpu" else {}),
+            "device_type": optuna_device,
+            "n_jobs": _training_n_jobs(),
         }
 
         # Optuna mini-search (20 trials) — only when we have a validation set
@@ -185,13 +189,18 @@ class DangerGate:
                     "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 5.0, log=True),
                     "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 5.0, log=True),
                 }
-                bst = lgb.train(
-                    trial_params,
-                    dtrain_opt,
-                    num_boost_round=trial.suggest_int("n_estimators", 100, 500),
-                    valid_sets=[dval_opt],
-                    callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(-1)],
-                )
+                try:
+                    bst = lgb.train(
+                        trial_params,
+                        dtrain_opt,
+                        num_boost_round=trial.suggest_int("n_estimators", 100, 500),
+                        valid_sets=[dval_opt],
+                        callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(-1)],
+                    )
+                except Exception:
+                    # Degenerate parameter combo (e.g. GPU assertion, empty node).
+                    # Prune instead of failing the whole study.
+                    raise optuna.exceptions.TrialPruned()
                 proba = np.asarray(bst.predict(val_X))
                 pred_tier = np.argmax(proba, axis=1)
                 # macro-F1 (negate for minimization)
@@ -206,10 +215,14 @@ class DangerGate:
                 pruner=optuna.pruners.MedianPruner(n_startup_trials=5),
             )
             study.optimize(_gate_objective, n_trials=20, show_progress_bar=False)
-            best_lgbm_params.update(
-                {k: v for k, v in study.best_params.items() if k not in ("n_estimators",)}
-            )
-            n_estimators = study.best_params.get("n_estimators", n_estimators)
+            completed = [t for t in study.trials if t.state.name == "COMPLETE"]
+            if completed:
+                best_lgbm_params.update(
+                    {k: v for k, v in study.best_params.items() if k not in ("n_estimators",)}
+                )
+                n_estimators = study.best_params.get("n_estimators", n_estimators)
+            else:
+                logger.warning("All DangerGate Optuna trials pruned; using default params.")
 
         params = {**base_params, **best_lgbm_params}
         dtrain = lgb.Dataset(X, label=y_tier, weight=sample_weight)
