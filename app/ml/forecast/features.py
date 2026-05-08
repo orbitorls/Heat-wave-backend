@@ -93,15 +93,15 @@ def build_X_once(
         np.log(np.clip(df["rh"] / 100.0, 1e-9, 1.0))
         + _a_mag * df["temp_c"] / (_b_mag + df["temp_c"])
     )
-    df["dewpoint_c"] = _b_mag * _gamma / (_a_mag - _gamma)
+    _dewpoint_c = _b_mag * _gamma / (_a_mag - _gamma)
 
     # Vapour Pressure Deficit (kPa)
     _es = 0.6108 * np.exp(17.27 * df["temp_c"] / (df["temp_c"] + 237.3))
-    df["vpd_kpa"] = _es * (1.0 - np.clip(df["rh"] / 100.0, 0.0, 1.0))
+    _vpd_kpa = _es * (1.0 - np.clip(df["rh"] / 100.0, 0.0, 1.0))
 
     # Stull (2011) wet-bulb approximation
     _T, _R = df["temp_c"], np.clip(df["rh"], 0.0, 100.0)
-    df["wbgt_stull_c"] = (
+    _wbgt_stull_c = (
         _T * np.arctan(0.151977 * np.sqrt(_R + 8.313659))
         + np.arctan(_T + _R)
         - np.arctan(_R - 1.676331)
@@ -112,63 +112,100 @@ def build_X_once(
     # (causal). They will be lagged below (shift >= 1) and MUST NOT appear as
     # un-lagged raw columns in the output feature matrix X.
 
-    df["hour"] = df["ts_utc"].dt.hour
-    df["day_of_year"] = df["ts_utc"].dt.day_of_year
-    df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
-    df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
-    local_hour = (df["hour"] + 7) % 24
-    df["local_hour_sin"] = np.sin(2 * np.pi * local_hour / 24)
-    df["local_hour_cos"] = np.cos(2 * np.pi * local_hour / 24)
-    df["doy_sin"] = np.sin(2 * np.pi * df["day_of_year"] / 365)
-    df["doy_cos"] = np.cos(2 * np.pi * df["day_of_year"] / 365)
-    df["month"] = df["ts_utc"].dt.month
+    _hour = df["ts_utc"].dt.hour
+    _day_of_year = df["ts_utc"].dt.day_of_year
+    _hour_sin = np.sin(2 * np.pi * _hour / 24)
+    _hour_cos = np.cos(2 * np.pi * _hour / 24)
+    local_hour = (_hour + 7) % 24
+    _local_hour_sin = np.sin(2 * np.pi * local_hour / 24)
+    _local_hour_cos = np.cos(2 * np.pi * local_hour / 24)
+    _doy_sin = np.sin(2 * np.pi * _day_of_year / 365)
+    _doy_cos = np.cos(2 * np.pi * _day_of_year / 365)
+    _month = df["ts_utc"].dt.month
 
     # Station encoding (label encode)
+    _station_enc = None
     if "station_id" in df.columns:
-        df["station_enc"] = df["station_id"].astype("category").cat.codes
+        _station_enc = df["station_id"].astype("category").cat.codes
 
     # Station geometry features — constant per-station lat/lon/elevation
+    _lat = None
+    _lon = None
+    _elevation_m = None
     if "station_id" in df.columns:
-        df["lat"] = df["station_id"].map(
+        _lat = df["station_id"].map(
             lambda sid: STATIONS[sid].lat if sid in STATIONS else 0.0
         )
-        df["lon"] = df["station_id"].map(
+        _lon = df["station_id"].map(
             lambda sid: STATIONS[sid].lon if sid in STATIONS else 0.0
         )
-        df["elevation_m"] = df["station_id"].map(
+        _elevation_m = df["station_id"].map(
             lambda sid: STATIONS[sid].elevation_m if sid in STATIONS else 0.0
         )
+
+    # Batch add physics and temporal features
+    _new_cols = {
+        "dewpoint_c": _dewpoint_c,
+        "vpd_kpa": _vpd_kpa,
+        "wbgt_stull_c": _wbgt_stull_c,
+        "hour": _hour,
+        "day_of_year": _day_of_year,
+        "hour_sin": _hour_sin,
+        "hour_cos": _hour_cos,
+        "local_hour_sin": _local_hour_sin,
+        "local_hour_cos": _local_hour_cos,
+        "doy_sin": _doy_sin,
+        "doy_cos": _doy_cos,
+        "month": _month,
+    }
+    if _station_enc is not None:
+        _new_cols["station_enc"] = _station_enc
+    if _lat is not None:
+        _new_cols["lat"] = _lat
+        _new_cols["lon"] = _lon
+        _new_cols["elevation_m"] = _elevation_m
+    df = pd.concat([df, pd.DataFrame(_new_cols, index=df.index)], axis=1)
+    
+    # Recreate station_group after adding new columns
+    station_group = df.groupby("station_id", sort=False)
 
     # Lag features — native GroupBy.shift avoids Python-level lambda overhead
     _sid = df["station_id"]
     # B4: lag 168h added; B1: dewpoint_c, wbgt_stull_c, and vpd_kpa lagged alongside core vars
+    _lag_cols = {}
     for col in ["heat_index_c", "temp_c", "rh", "dewpoint_c", "wbgt_stull_c", "vpd_kpa"]:
         grp = station_group[col]
         for lag in lags_h:
-            df[f"{col}_lag{lag}h"] = grp.shift(lag)
+            _lag_cols[f"{col}_lag{lag}h"] = grp.shift(lag)
+    df = pd.concat([df, pd.DataFrame(_lag_cols, index=df.index)], axis=1)
 
     # Cooling-rate features — difference over a 3-hour window using past values only
     _hi_grp = station_group["heat_index_c"]
     _tc_grp = station_group["temp_c"]
-    df["hi_change_3h"] = _hi_grp.shift(1) - _hi_grp.shift(4)
-    df["temp_change_3h"] = _tc_grp.shift(1) - _tc_grp.shift(4)
+    _cooling_cols = {
+        "hi_change_3h": _hi_grp.shift(1) - _hi_grp.shift(4),
+        "temp_change_3h": _tc_grp.shift(1) - _tc_grp.shift(4),
+    }
+    df = pd.concat([df, pd.DataFrame(_cooling_cols, index=df.index)], axis=1)
 
     # Rolling features — on the already-shifted series to avoid leakage.
     # GroupBy.shift returns a flat Series; re-group by station_id for rolling.
     # B2: rh and dewpoint_c added to rolling cols
+    _roll_cols = {}
     for col in ["heat_index_c", "temp_c", "rh", "dewpoint_c"]:
         shifted = station_group[col].shift(1)
         grp_shifted = shifted.groupby(_sid, sort=False)
         for w in rolling_h:
-            df[f"{col}_roll{w}h_mean"] = (
+            _roll_cols[f"{col}_roll{w}h_mean"] = (
                 grp_shifted.rolling(w, min_periods=1).mean().reset_index(level=0, drop=True)
             )
-            df[f"{col}_roll{w}h_std"] = (
+            _roll_cols[f"{col}_roll{w}h_std"] = (
                 grp_shifted.rolling(w, min_periods=1).std().fillna(0).reset_index(level=0, drop=True)
             )
+    df = pd.concat([df, pd.DataFrame(_roll_cols, index=df.index)], axis=1)
 
     # B2: temp_range_24h — 24h rolling max minus min, shifted by 1 for causality
-    df["temp_range_24h"] = (
+    _temp_range_24h = (
         df.groupby("station_id")["temp_c"]
         .transform(
             lambda x: (
@@ -180,18 +217,26 @@ def build_X_once(
 
     # Core interaction feature — uses shift(1) to avoid leakage
     _tc_lag1 = station_group["temp_c"].shift(1)
-    df["temp_x_rh"] = _tc_lag1 * station_group["rh"].shift(1)
+    _temp_x_rh = _tc_lag1 * station_group["rh"].shift(1)
 
     # Evening-peak interaction — captures high-temp risk during 16:00–20:00 local time
     local_hour_num = (df["ts_utc"].dt.hour + 7) % 24
     evening_mask = ((local_hour_num >= 16) & (local_hour_num <= 20)).astype(float)
-    df["temp_x_evening"] = _tc_lag1 * evening_mask
+    _temp_x_evening = _tc_lag1 * evening_mask
+
+    _interaction_cols = {
+        "temp_range_24h": _temp_range_24h,
+        "temp_x_rh": _temp_x_rh,
+        "temp_x_evening": _temp_x_evening,
+    }
+    df = pd.concat([df, pd.DataFrame(_interaction_cols, index=df.index)], axis=1)
 
     # Extended atmospheric features — included when the column is present AND
     # at least 30% non-null. Missing values are forward-filled then backfilled
     # so lag creation doesn't explode with NaN.
     _EXTENDED_COLS = ["solar_wm2", "cloud_cover", "blh_m", "pressure_hpa", "lst_c"]
     _EXTENDED_LAGS = [1, 3, 6]  # shorter lag set for sparser extended variables
+    _extended_cols = {}
     for col in _EXTENDED_COLS:
         if col not in df.columns:
             continue
@@ -202,20 +247,23 @@ def build_X_once(
         # future observations to fill earlier feature rows.
         df[col] = station_group[col].ffill()
         for lag in _EXTENDED_LAGS:
-            df[f"{col}_lag{lag}h"] = station_group[col].shift(lag)
+            _extended_cols[f"{col}_lag{lag}h"] = station_group[col].shift(lag)
         # Rolling mean for solar (captures day trend) + solar-temp interaction
         if col == "solar_wm2":
             sol_shifted = station_group[col].shift(1)
-            df["solar_wm2_roll6h_mean"] = (
+            _extended_cols["solar_wm2_roll6h_mean"] = (
                 sol_shifted.groupby(_sid, sort=False).rolling(6, min_periods=1).mean()
                 .reset_index(level=0, drop=True)
             )
-            df["temp_x_solar"] = _tc_lag1 * sol_shifted
+            _extended_cols["temp_x_solar"] = _tc_lag1 * sol_shifted
+    if _extended_cols:
+        df = pd.concat([df, pd.DataFrame(_extended_cols, index=df.index)], axis=1)
 
     # Wind and precipitation features — included when present AND ≥20% non-null.
     # Shorter lag set since these are typically sparser than core met variables.
     _WIND_PRECIP_COLS = ["wind_ms", "precip_mm"]
     _WIND_PRECIP_LAGS = [1, 3]
+    _wind_precip_cols = {}
     for col in _WIND_PRECIP_COLS:
         if col not in df.columns:
             continue
@@ -224,15 +272,17 @@ def build_X_once(
             continue  # too sparse
         df[col] = station_group[col].ffill()
         for lag in _WIND_PRECIP_LAGS:
-            df[f"{col}_lag{lag}h"] = station_group[col].shift(lag)
+            _wind_precip_cols[f"{col}_lag{lag}h"] = station_group[col].shift(lag)
 
     # Always ensure lag columns exist for consistency with get_feature_names().
     # Filled with 0 when the source column was absent or too sparse.
     for col in _WIND_PRECIP_COLS:
         for lag in _WIND_PRECIP_LAGS:
             lag_col = f"{col}_lag{lag}h"
-            if lag_col not in df.columns:
-                df[lag_col] = 0.0
+            if lag_col not in df.columns and lag_col not in _wind_precip_cols:
+                _wind_precip_cols[lag_col] = 0.0
+    if _wind_precip_cols:
+        df = pd.concat([df, pd.DataFrame(_wind_precip_cols, index=df.index)], axis=1)
 
     # Climatology residual — causal expanding mean per (station, month, hour)
     # bucket. For row at time t with bucket key K, _hi_clim[t] is the mean of
@@ -243,11 +293,25 @@ def build_X_once(
     # mean within each bucket is causal. For the first occurrence of a bucket
     # the expanding mean equals heat_index_c itself; that is still leak-free.
     bucket = df.groupby(["station_id", "month", "hour"], sort=False)["heat_index_c"]
-    df["_hi_clim"] = bucket.transform(lambda s: s.expanding(min_periods=1).mean())
-    df["hi_residual_lag1h"] = (
-        station_group["heat_index_c"].shift(1)
-        - station_group["_hi_clim"].shift(1)
-    )
+    _hi_clim = bucket.transform(lambda s: s.expanding(min_periods=1).mean())
+    _clim_cols = {
+        "_hi_clim": _hi_clim,
+    }
+    df = pd.concat([df, pd.DataFrame(_clim_cols, index=df.index)], axis=1)
+    
+    # Recreate station_group after adding _hi_clim
+    station_group = df.groupby("station_id", sort=False)
+    
+    _residual_cols = {
+        "hi_residual_lag1h": (
+            station_group["heat_index_c"].shift(1)
+            - station_group["_hi_clim"].shift(1)
+        ),
+    }
+    df = pd.concat([df, pd.DataFrame(_residual_cols, index=df.index)], axis=1)
+    
+    # Recreate station_group after adding residual columns
+    station_group = df.groupby("station_id", sort=False)
 
     # Target-time climatology — causal expanding mean of heat_index_c at the
     # (station, target_month, target_hour) bucket for each forecast horizon.
@@ -256,17 +320,16 @@ def build_X_once(
     # Causal invariant: the expanding mean at row t uses only rows with ts_utc <= t
     # in that bucket, because rows are sorted by (station_id, ts_utc) above.
     _TARGET_HORIZONS = [6, 12, 24, 48, 72]
+    _target_cols = {}
     for _h in _TARGET_HORIZONS:
         _target_ts = df["ts_utc"] + pd.Timedelta(hours=_h)
-        _t_hour_col = f"_th{_h}_hour"
-        _t_month_col = f"_th{_h}_month"
-        df[_t_hour_col] = _target_ts.dt.hour
-        df[_t_month_col] = _target_ts.dt.month
-        _tbucket = df.groupby(["station_id", _t_month_col, _t_hour_col], sort=False)["heat_index_c"]
-        df[f"target_h{_h}_hi_clim"] = _tbucket.transform(lambda s: s.expanding(min_periods=1).mean())
-        df[f"target_h{_h}_hour_sin"] = np.sin(2 * np.pi * df[_t_hour_col] / 24)
-        df[f"target_h{_h}_hour_cos"] = np.cos(2 * np.pi * df[_t_hour_col] / 24)
-        df.drop(columns=[_t_hour_col, _t_month_col], inplace=True)
+        _t_hour = _target_ts.dt.hour
+        _t_month = _target_ts.dt.month
+        _tbucket = df.groupby(["station_id", _t_month, _t_hour], sort=False)["heat_index_c"]
+        _target_cols[f"target_h{_h}_hi_clim"] = _tbucket.transform(lambda s: s.expanding(min_periods=1).mean())
+        _target_cols[f"target_h{_h}_hour_sin"] = np.sin(2 * np.pi * _t_hour / 24)
+        _target_cols[f"target_h{_h}_hour_cos"] = np.cos(2 * np.pi * _t_hour / 24)
+    df = pd.concat([df, pd.DataFrame(_target_cols, index=df.index)], axis=1)
 
     # Columns excluded from X (identifiers, raw targets, or now-promoted wind/precip
     # that appear only through their lag derivatives).
