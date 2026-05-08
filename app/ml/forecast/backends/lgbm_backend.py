@@ -609,13 +609,14 @@ class LGBMForecaster:
         def objective(trial: optuna.Trial) -> float:
             dense_alpha = trial.suggest_float("dense_alpha", 0.3, 1.5)
             dev = _detect_device()
+            _max_bin_choices = [127, 255] if dev == "gpu" else [127, 255, 511]
             params = {
                 **_DEFAULT_PARAMS,
                 **_lgbm_device_params(dev),
                 "alpha": 0.50,
                 "num_leaves": trial.suggest_int("num_leaves", 31, 255),
                 "max_depth": trial.suggest_int("max_depth", 4, 12),
-                "max_bin": trial.suggest_categorical("max_bin", [127, 255, 511]),
+                "max_bin": trial.suggest_categorical("max_bin", _max_bin_choices),
                 "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
                 "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
@@ -1102,13 +1103,14 @@ class LGBMDirectHIForecaster:
 
         def objective(trial: optuna.Trial) -> float:
             dev = _detect_device()
+            _max_bin_choices = [127, 255] if dev == "gpu" else [127, 255, 511]
             params = {
                 **_DEFAULT_PARAMS,
                 **_lgbm_device_params(dev),
                 "alpha": 0.50,
                 "num_leaves": trial.suggest_int("num_leaves", 31, 255),
                 "max_depth": trial.suggest_int("max_depth", 4, 12),
-                "max_bin": trial.suggest_categorical("max_bin", [127, 255, 511]),
+                "max_bin": trial.suggest_categorical("max_bin", _max_bin_choices),
                 "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
                 "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
