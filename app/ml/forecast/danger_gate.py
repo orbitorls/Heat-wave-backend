@@ -176,6 +176,7 @@ class DangerGate:
             def _gate_objective(trial: optuna.Trial) -> float:
                 trial_params = {
                     **base_params,
+                    "feature_pre_filter": False,
                     "num_leaves": trial.suggest_int("num_leaves", 31, 127),
                     "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
                     "subsample": trial.suggest_float("subsample", 0.6, 1.0),
