@@ -606,20 +606,23 @@ class LGBMForecaster:
         import lightgbm as lgb
         import optuna
 
-        # Detect device once; use fixed max_bin choices across all devices to keep
-        # Optuna study compatible when resuming (load_if_exists=True). GPU ignores 511 gracefully.
+        # Fixed categorical choices keep Optuna study compatible across CPU/GPU runs
+        # (load_if_exists=True replays prior trial params). Clamp at apply-time for GPU,
+        # since LightGBM GPU rejects bin_size=512 (max_bin=511) with a fatal error.
         dev = _detect_device()
         _max_bin_choices = [127, 255, 511]
 
         def objective(trial: optuna.Trial) -> float:
             dense_alpha = trial.suggest_float("dense_alpha", 0.3, 1.5)
+            _suggested_bin = trial.suggest_categorical("max_bin", _max_bin_choices)
+            _effective_bin = min(_suggested_bin, 255) if dev == "gpu" else _suggested_bin
             params = {
                 **_DEFAULT_PARAMS,
                 **_lgbm_device_params(dev),
                 "alpha": 0.50,
                 "num_leaves": trial.suggest_int("num_leaves", 31, 255),
                 "max_depth": trial.suggest_int("max_depth", 4, 12),
-                "max_bin": trial.suggest_categorical("max_bin", _max_bin_choices),
+                "max_bin": _effective_bin,
                 "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
                 "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
@@ -1106,14 +1109,16 @@ class LGBMDirectHIForecaster:
 
         def objective(trial: optuna.Trial) -> float:
             dev = _detect_device()
-            _max_bin_choices = [127, 255] if dev == "gpu" else [127, 255, 511]
+            _max_bin_choices = [127, 255, 511]
+            _suggested_bin = trial.suggest_categorical("max_bin", _max_bin_choices)
+            _effective_bin = min(_suggested_bin, 255) if dev == "gpu" else _suggested_bin
             params = {
                 **_DEFAULT_PARAMS,
                 **_lgbm_device_params(dev),
                 "alpha": 0.50,
                 "num_leaves": trial.suggest_int("num_leaves", 31, 255),
                 "max_depth": trial.suggest_int("max_depth", 4, 12),
-                "max_bin": trial.suggest_categorical("max_bin", _max_bin_choices),
+                "max_bin": _effective_bin,
                 "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
                 "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "bagging_freq": trial.suggest_int("bagging_freq", 0, 7),
