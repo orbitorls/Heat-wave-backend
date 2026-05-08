@@ -29,12 +29,14 @@ DRIVE_ROOT="${DRIVE_ROOT:-/content/drive/MyDrive/heatshield}"
 
 log() { printf '[bootstrap] %s\n' "$*"; }
 
-# --- 1. Mount Google Drive --------------------------------------------------
+# --- 1. Check Drive is mounted (must be done in Colab cell, not subprocess) --
 if [ ! -d /content/drive/MyDrive ]; then
-  log "Mounting Google Drive ..."
-  python -c "from google.colab import drive; drive.mount('/content/drive', force_remount=False)"
+  log "ERROR: Google Drive not mounted."
+  log "Run this in a Python cell first:"
+  log "  from google.colab import drive; drive.mount('/content/drive')"
+  exit 1
 else
-  log "Drive already mounted."
+  log "Drive mounted OK."
 fi
 
 # --- 2. Ensure Drive folder layout -----------------------------------------

@@ -6,6 +6,8 @@ after that row's own ts_utc.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -257,3 +259,33 @@ def test_extended_feature_fill_does_not_backfill_future_values():
     # solar_wm2 was present from index 5, so after ffill and lag1h, value is 50.0.
     assert X["solar_wm2_lag1h"].iloc[0] == 50.0
     assert not (X["solar_wm2_lag1h"] == 0.0).any()
+
+
+def test_feature_builder_does_not_fragment_dataframe_with_extended_columns():
+    n = 260
+    rng = np.random.default_rng(123)
+    df = pd.DataFrame({
+        "ts_utc": pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC"),
+        "station_id": "BKK_01",
+        "temp_c": 30.0 + rng.normal(0, 2, n),
+        "rh": 70.0 + rng.normal(0, 5, n),
+        "heat_index_c": 34.0 + rng.normal(0, 2, n),
+        "solar_wm2": np.maximum(0, rng.normal(300, 120, n)),
+        "cloud_cover": rng.uniform(0, 1, n),
+        "blh_m": rng.normal(900, 100, n),
+        "pressure_hpa": rng.normal(1010, 3, n),
+        "lst_c": rng.normal(33, 2, n),
+        "wind_ms": rng.uniform(0, 6, n),
+        "precip_mm": np.maximum(0, rng.normal(0.2, 0.5, n)),
+    })
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", pd.errors.PerformanceWarning)
+        X, y = build_features(df, horizon_h=24)
+
+    perf_warnings = [
+        warning for warning in caught
+        if issubclass(warning.category, pd.errors.PerformanceWarning)
+    ]
+    assert not perf_warnings
+    assert len(X) == len(y)
