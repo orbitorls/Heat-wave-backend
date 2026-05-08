@@ -431,6 +431,9 @@ def load_latest_v3(station_id: str, horizon_h: int):
     elif backend_name == "xgboost":
         from app.ml.forecast.backends.xgb_backend import XGBForecaster
         return XGBForecaster.load(slot_dir)
+    elif backend_name == "catboost_quantile":
+        from app.ml.forecast.backends.catboost_backend import CatBoostForecaster
+        return CatBoostForecaster.load(slot_dir)
     elif backend_name == "tabpfn":
         raise NotImplementedError(
             "TabPFN backend is not yet implemented. "

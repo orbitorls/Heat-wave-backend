@@ -196,7 +196,7 @@ def predict(
                 rh=_rh_v3,
                 pi_lower=round(_lo, 2),
                 pi_upper=round(_hi_up, 2),
-                model_version="forecast_v3_lgbm",
+                model_version=f"forecast_v3_{getattr(_forecaster, 'backend_name', 'unknown')}",
             ))
             if _low_conf_h and not low_confidence:
                 low_confidence = True

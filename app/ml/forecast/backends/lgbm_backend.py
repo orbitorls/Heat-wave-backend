@@ -6,6 +6,7 @@ An optional DangerGate classifier routes samples ≥ 40°C through a tail regres
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import gc
@@ -674,9 +675,15 @@ class LGBMForecaster:
             list(X_tune.columns),
             extra="lags=[1,3,6,12,24]|roll=[3,6,24]",
         )
+        _space_keys = [
+            "dense_alpha", "max_bin", "num_leaves", "max_depth", "learning_rate",
+            "subsample", "bagging_freq", "colsample_bytree", "min_child_samples",
+            "min_child_weight", "reg_alpha", "reg_lambda",
+        ]
+        _space_sig = hashlib.md5(",".join(_space_keys).encode()).hexdigest()[:8]
         storage_path = _optuna_storage_path()
         storage_path.parent.mkdir(parents=True, exist_ok=True)
-        study_name = f"lgbm_{self._station_id}_{self.target_kind}_h{self._horizon_h}_{_feat_sig}"
+        study_name = f"lgbm_{self._station_id}_{self.target_kind}_h{self._horizon_h}_{_feat_sig}_{dev}_{_space_sig}"
         try:
             _storage = optuna.storages.RDBStorage(f"sqlite:///{storage_path.as_posix()}?check_same_thread=False")
         except Exception:
@@ -1159,9 +1166,16 @@ class LGBMDirectHIForecaster:
             list(X_train.columns),
             extra="lags=[1,3,6,12,24]|roll=[3,6,24]",
         )
+        _hi_space_keys = [
+            "max_bin", "num_leaves", "max_depth", "learning_rate",
+            "subsample", "colsample_bytree", "min_child_samples",
+            "min_child_weight", "reg_alpha", "reg_lambda",
+        ]
+        _space_sig = hashlib.md5(",".join(_hi_space_keys).encode()).hexdigest()[:8]
+        _dev_for_name = _detect_device()
         storage_path = _optuna_storage_path()
         storage_path.parent.mkdir(parents=True, exist_ok=True)
-        study_name = f"lgbm_{self._station_id}_{self.target_kind}_h{self._horizon_h}_{_feat_sig}"
+        study_name = f"lgbm_{self._station_id}_{self.target_kind}_h{self._horizon_h}_{_feat_sig}_{_dev_for_name}_{_space_sig}"
         try:
             _storage = optuna.storages.RDBStorage(f"sqlite:///{storage_path.as_posix()}?check_same_thread=False")
         except Exception:

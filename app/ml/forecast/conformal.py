@@ -170,17 +170,23 @@ class MondianCQRCalibrator:
         station_arr = np.asarray(station_ids, dtype=str)
         tiers = np.zeros(len(y_lower), dtype=int) if danger_tiers is None else np.asarray(danger_tiers, dtype=int)
 
+        # Guard NaN station_ids: np.asarray(dtype=str) converts NaN → literal "nan"
+        # which silently misses every stratum. Replace with a known fallback key.
+        station_arr = np.where(station_arr == "nan", "<unknown>", station_arr)
+
         hour_bins_fine = (np.asarray(local_hours, dtype=int) // 3).astype(int)
         hour_bins_coarse = (np.asarray(local_hours, dtype=int) // 6).astype(int)
 
-        # Build lookup keys: fine then coarse then global fallback
-        # Use numpy unique for efficiency
-        fine_key_strs = np.array([
-            f"{s}|f{hf}|{t}" for s, hf, t in zip(station_arr, hour_bins_fine, tiers)
-        ])
-        coarse_key_strs = np.array([
-            f"{s}|c{hc}|{t}" for s, hc, t in zip(station_arr, hour_bins_coarse, tiers)
-        ])
+        # Build vectorized lookup keys (avoids O(n) Python loop per row)
+        _tier_str = tiers.astype(str)
+        fine_key_strs = np.char.add(
+            np.char.add(station_arr, "|f"),
+            np.char.add(hour_bins_fine.astype(str), np.char.add("|", _tier_str)),
+        )
+        coarse_key_strs = np.char.add(
+            np.char.add(station_arr, "|c"),
+            np.char.add(hour_bins_coarse.astype(str), np.char.add("|", _tier_str)),
+        )
 
         unique_fine, inv_fine = np.unique(fine_key_strs, return_inverse=True)
         unique_coarse, inv_coarse = np.unique(coarse_key_strs, return_inverse=True)

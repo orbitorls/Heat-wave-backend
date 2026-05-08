@@ -640,21 +640,99 @@ def main() -> None:
                 del forecaster, bundle, split
                 gc.collect()
 
-                # Optional CatBoost training when --backends includes "catboost"
+                # Optional CatBoost training when --backends includes "catboost".
+                # Trained head-to-head against the LGBM champion; the better backend wins
+                # the slot and updates choice_matrix.json.
                 backends_to_train = [b.strip() for b in getattr(args, "backends", "lgbm").split(",")]
                 if "catboost" in backends_to_train:
                     try:
                         from app.ml.forecast.backends.catboost_backend import CatBoostForecaster
                         logger.info("Training CatBoost backend: station=%s horizon=%d", sid, h)
-                        catboost_forecaster = CatBoostForecaster(
+                        if target_kind == "th":
+                            y_cb = pd.Series(
+                                _compute_hi_array(y["temp_c"].values, y["rh"].values),
+                                index=y.index, name="heat_index_c",
+                            )
+                        else:
+                            y_cb = y
+                        cb_forecaster = CatBoostForecaster(
                             n_trials=getattr(args, "trials", 10),
                             random_state=42,
                         )
-                        catboost_forecaster.fit(X, y, station_id=sid, horizon_h=h)
-                        catboost_path = slot_dir / "catboost"
-                        catboost_forecaster.save(catboost_path)
-                        logger.info("CatBoost model saved to %s", catboost_path)
-                        del catboost_forecaster
+                        cb_forecaster.fit(X, y_cb, station_id=sid, horizon_h=h)
+                        cb_split = split_xy(X, y_cb, horizon_h=h)
+                        cb_bundle = cb_forecaster.predict_with_pi(cb_split.X_test)
+                        cb_y_true = cb_split.y_test.values
+                        cb_out_dir = eval_run_dir / cb_forecaster.backend_name / sid / f"h{h}"
+                        cb_eval = evaluate_predictions(
+                            cb_y_true,
+                            cb_bundle.hi_mean,
+                            cb_split.X_test,
+                            out_dir=cb_out_dir,
+                            horizon_h=h,
+                            station_labels={0: sid},
+                            q05=cb_bundle.hi_lower,
+                            q95=cb_bundle.hi_upper,
+                            runtime={"train_seconds": cb_forecaster._metadata.get("train_seconds", 0.0)},
+                            split_metadata=cb_split.metadata,
+                            station=sid,
+                            eval_dpi=80,
+                        )
+                        cb_status = _quality_status(cb_eval)
+                        cb_metrics = {
+                            "run_id": run_id,
+                            "status": cb_status,
+                            "n_train_rows": cb_split.metadata["row_counts"]["train"],
+                            "horizons": horizons,
+                            "evaluation": cb_eval,
+                        }
+                        cb_new_mae = cb_eval.get("regression", {}).get("mae", float("inf"))
+                        cb_champion_mae = _read_champion_mae(slot_dir)
+                        cb_champion_kept = False
+                        if not args.force and cb_champion_mae is not None and cb_new_mae >= cb_champion_mae:
+                            logger.info(
+                                "CatBoost champion-challenger: keeping existing model "
+                                "(champion MAE=%.4f <= challenger MAE=%.4f) for station=%s h=%d",
+                                cb_champion_mae, cb_new_mae, sid, h,
+                            )
+                            cb_champion_kept = True
+                        else:
+                            registry.save_model_v3(cb_forecaster, cb_metrics, sid, h)
+                            logger.info(
+                                "CatBoost saved challenger (MAE=%.4f%s) for station=%s h=%d",
+                                cb_new_mae,
+                                f" < champion {cb_champion_mae:.4f}" if cb_champion_mae is not None else " — new slot",
+                                sid, h,
+                            )
+
+                        cb_row_eval = cb_eval
+                        cb_row_status = cb_status
+                        if cb_champion_kept:
+                            try:
+                                champ_data = json.loads((slot_dir / "registry.json").read_text(encoding="utf-8"))
+                                cb_row_eval = champ_data.get("evaluation", cb_eval)
+                                cb_row_status = champ_data.get("status", cb_status)
+                            except Exception:
+                                pass
+
+                        cb_row = {
+                            "backend": cb_forecaster.backend_name,
+                            "station": sid,
+                            "horizon_h": h,
+                            "mae": cb_row_eval.get("regression", {}).get("mae",
+                                     cb_eval.get("regression", {}).get("mae", float("nan"))),
+                            "skill_score": cb_row_eval.get("baselines", {}).get("skill_score",
+                                             cb_eval.get("baselines", {}).get("skill_score", float("nan"))),
+                            "danger_recall_42": cb_row_eval.get("safety", {}).get("danger_42", {}).get("recall",
+                                                  cb_eval.get("safety", {}).get("danger_42", {}).get("recall")),
+                            "status": cb_row_status,
+                            "eval_dir": str(cb_out_dir),
+                            **({"champion_kept": True} if cb_champion_kept else {}),
+                        }
+                        rows.append(cb_row)
+                        _record_leaderboard_row(cb_row)
+                        logger.info("CatBoost v3 training done: station=%s h=%d", sid, h)
+                        del cb_forecaster, cb_bundle, cb_split, y_cb
                         gc.collect()
                     except Exception as exc:
                         logger.warning("CatBoost training failed (%s) — skipping", exc)

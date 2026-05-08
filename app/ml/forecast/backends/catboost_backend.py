@@ -224,7 +224,9 @@ class CatBoostForecaster:
             result[role] = preds
         return result
 
-    def predict_with_pi(self, X: pd.DataFrame) -> PredictionBundle:
+    def predict_with_pi(self, X: pd.DataFrame, alpha: float = 0.10) -> PredictionBundle:
+        # alpha ignored; calibrator was fit at alpha=0.10 during training.
+        del alpha
         raw = self._predict_raw(X)
         hi_mean = raw["q50"]
         hi_lower = raw["q05"]

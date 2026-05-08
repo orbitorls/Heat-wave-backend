@@ -99,8 +99,9 @@ def build_X_once(
     _es = 0.6108 * np.exp(17.27 * df["temp_c"] / (df["temp_c"] + 237.3))
     _vpd_kpa = _es * (1.0 - np.clip(df["rh"] / 100.0, 0.0, 1.0))
 
-    # Stull (2011) wet-bulb approximation
-    _T, _R = df["temp_c"], np.clip(df["rh"], 0.0, 100.0)
+    # Stull (2011) wet-bulb approximation; valid domain T in [-20,50]°C, RH in [0,100].
+    # Clamp to prevent NaN from sensor outliers propagating into lag/rolling features.
+    _T, _R = np.clip(df["temp_c"], -20.0, 50.0), np.clip(df["rh"], 0.0, 100.0)
     _wbgt_stull_c = (
         _T * np.arctan(0.151977 * np.sqrt(_R + 8.313659))
         + np.arctan(_T + _R)
