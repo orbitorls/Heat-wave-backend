@@ -606,9 +606,10 @@ class LGBMForecaster:
         import lightgbm as lgb
         import optuna
 
-        # Detect device and set max_bin choices once (outside objective to avoid dynamic categorical space)
+        # Detect device once; use fixed max_bin choices across all devices to keep
+        # Optuna study compatible when resuming (load_if_exists=True). GPU ignores 511 gracefully.
         dev = _detect_device()
-        _max_bin_choices = [127, 255] if dev == "gpu" else [127, 255, 511]
+        _max_bin_choices = [127, 255, 511]
 
         def objective(trial: optuna.Trial) -> float:
             dense_alpha = trial.suggest_float("dense_alpha", 0.3, 1.5)
