@@ -238,6 +238,7 @@ def build_X_once(
     _EXTENDED_COLS = ["solar_wm2", "cloud_cover", "blh_m", "pressure_hpa", "lst_c"]
     _EXTENDED_LAGS = [1, 3, 6]  # shorter lag set for sparser extended variables
     _extended_cols = {}
+    _filled_extended_sources = {}
     for col in _EXTENDED_COLS:
         if col not in df.columns:
             continue
@@ -246,34 +247,47 @@ def build_X_once(
             continue  # not enough data to be useful
         # Forward-fill gaps within station only. Do not backfill: that would use
         # future observations to fill earlier feature rows.
-        df[col] = station_group[col].ffill()
+        filled = station_group[col].ffill()
+        _filled_extended_sources[col] = filled
+        filled_group = filled.groupby(_sid, sort=False)
         for lag in _EXTENDED_LAGS:
-            _extended_cols[f"{col}_lag{lag}h"] = station_group[col].shift(lag)
+            _extended_cols[f"{col}_lag{lag}h"] = filled_group.shift(lag)
         # Rolling mean for solar (captures day trend) + solar-temp interaction
         if col == "solar_wm2":
-            sol_shifted = station_group[col].shift(1)
+            sol_shifted = filled_group.shift(1)
             _extended_cols["solar_wm2_roll6h_mean"] = (
                 sol_shifted.groupby(_sid, sort=False).rolling(6, min_periods=1).mean()
                 .reset_index(level=0, drop=True)
             )
             _extended_cols["temp_x_solar"] = _tc_lag1 * sol_shifted
-    if _extended_cols:
-        df = pd.concat([df, pd.DataFrame(_extended_cols, index=df.index)], axis=1)
+    if _filled_extended_sources or _extended_cols:
+        df = pd.concat(
+            [
+                df.drop(columns=list(_filled_extended_sources), errors="ignore"),
+                pd.DataFrame(_filled_extended_sources, index=df.index),
+                pd.DataFrame(_extended_cols, index=df.index),
+            ],
+            axis=1,
+        )
 
     # Wind and precipitation features — included when present AND ≥20% non-null.
     # Shorter lag set since these are typically sparser than core met variables.
     _WIND_PRECIP_COLS = ["wind_ms", "precip_mm"]
     _WIND_PRECIP_LAGS = [1, 3]
     _wind_precip_cols = {}
+    _filled_wind_precip_sources = {}
+    station_group = df.groupby("station_id", sort=False)
     for col in _WIND_PRECIP_COLS:
         if col not in df.columns:
             continue
         fill_rate = df[col].notna().mean()
         if fill_rate < 0.20:
             continue  # too sparse
-        df[col] = station_group[col].ffill()
+        filled = station_group[col].ffill()
+        _filled_wind_precip_sources[col] = filled
+        filled_group = filled.groupby(_sid, sort=False)
         for lag in _WIND_PRECIP_LAGS:
-            _wind_precip_cols[f"{col}_lag{lag}h"] = station_group[col].shift(lag)
+            _wind_precip_cols[f"{col}_lag{lag}h"] = filled_group.shift(lag)
 
     # Always ensure lag columns exist for consistency with get_feature_names().
     # Filled with 0 when the source column was absent or too sparse.
@@ -282,8 +296,15 @@ def build_X_once(
             lag_col = f"{col}_lag{lag}h"
             if lag_col not in df.columns and lag_col not in _wind_precip_cols:
                 _wind_precip_cols[lag_col] = 0.0
-    if _wind_precip_cols:
-        df = pd.concat([df, pd.DataFrame(_wind_precip_cols, index=df.index)], axis=1)
+    if _filled_wind_precip_sources or _wind_precip_cols:
+        df = pd.concat(
+            [
+                df.drop(columns=list(_filled_wind_precip_sources), errors="ignore"),
+                pd.DataFrame(_filled_wind_precip_sources, index=df.index),
+                pd.DataFrame(_wind_precip_cols, index=df.index),
+            ],
+            axis=1,
+        )
 
     # Climatology residual — causal expanding mean per (station, month, hour)
     # bucket. For row at time t with bucket key K, _hi_clim[t] is the mean of

@@ -1,4 +1,8 @@
 {
-  "threshold": 0.35,
-  "danger_thresh": 40.0
+  "warning_floor": 38.0,
+  "danger_floor": 42.0,
+  "warning_threshold": 0.6000000000000002,
+  "danger_threshold": 0.6000000000000002,
+  "gate_backend": "brf",
+  "version": "v3-tier"
 }

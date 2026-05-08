@@ -6,6 +6,7 @@
     "solar_wm2",
     "cloud_cover",
     "pressure_hpa",
+    "blh_m",
     "hour_sin",
     "hour_cos",
     "local_hour_sin",
@@ -22,16 +23,22 @@
     "heat_index_c_lag6h",
     "heat_index_c_lag12h",
     "heat_index_c_lag24h",
+    "heat_index_c_lag48h",
+    "heat_index_c_lag72h",
     "temp_c_lag1h",
     "temp_c_lag3h",
     "temp_c_lag6h",
     "temp_c_lag12h",
     "temp_c_lag24h",
+    "temp_c_lag48h",
+    "temp_c_lag72h",
     "rh_lag1h",
     "rh_lag3h",
     "rh_lag6h",
     "rh_lag12h",
     "rh_lag24h",
+    "rh_lag48h",
+    "rh_lag72h",
     "hi_change_3h",
     "temp_change_3h",
     "heat_index_c_roll3h_mean",
@@ -69,9 +76,9 @@
   "target_kind": "th",
   "station_id": "CNX_01",
   "horizon_h": 6,
-  "run_id": "20260505T053817Z",
-  "status": "not_ready",
-  "n_train_rows": 12259,
+  "run_id": "20260507T142703Z",
+  "status": "candidate",
+  "n_train_rows": 24389,
   "horizons": [
     6,
     12,
@@ -82,18 +89,18 @@
   "evaluation": {
     "horizon_h": 6,
     "regression": {
-      "mae": 2.9378892249890467,
-      "rmse": 5.873601067603719,
-      "bias": 2.542825566220936,
-      "correlation": 0.8624654900412705,
-      "p50_abs_error": 1.0724078195492126,
-      "p90_abs_error": 9.717570051195642,
-      "p95_abs_error": 15.747962517218705
+      "mae": 0.8048805270287734,
+      "rmse": 1.1082438680067854,
+      "bias": -0.08397572807354589,
+      "correlation": 0.9777762698630574,
+      "p50_abs_error": 0.6155229647667113,
+      "p90_abs_error": 1.6857467211844472,
+      "p95_abs_error": 2.1389707316488646
     },
     "baselines": {
-      "persistence_mae": 6.655275085825018,
-      "climatology_mae": 1.557443753490958,
-      "skill_score": -0.8863533391840741
+      "persistence_mae": 5.810718424780786,
+      "climatology_mae": 1.4212818425463314,
+      "skill_score": 0.43369393533743417
     },
     "risk": {
       "labels": [
@@ -104,15 +111,15 @@
       ],
       "classification_report": {
         "Caution": {
-          "precision": 0.9957466918714556,
-          "recall": 0.8649425287356322,
-          "f1-score": 0.9257469244288224,
-          "support": 2436.0
+          "precision": 0.9910943993667128,
+          "recall": 0.9946375372393247,
+          "f1-score": 0.992862807295797,
+          "support": 5035.0
         },
         "Extreme Caution": {
-          "precision": 0.43042071197411,
-          "recall": 0.6927083333333334,
-          "f1-score": 0.530938123752495,
+          "precision": 0.8421052631578947,
+          "recall": 0.75,
+          "f1-score": 0.7933884297520661,
           "support": 192.0
         },
         "Danger": {
@@ -127,32 +134,32 @@
           "f1-score": 0.0,
           "support": 0.0
         },
-        "accuracy": 0.852359208523592,
+        "accuracy": 0.9856514252917543,
         "macro avg": {
-          "precision": 0.3565418509613914,
-          "recall": 0.3894127155172414,
-          "f1-score": 0.36417126204532935,
-          "support": 2628.0
+          "precision": 0.4582999156311519,
+          "recall": 0.43615938430983114,
+          "f1-score": 0.4465628092619658,
+          "support": 5227.0
         },
         "weighted avg": {
-          "precision": 0.9544443371757592,
-          "recall": 0.852359208523592,
-          "f1-score": 0.8969024458405975,
-          "support": 2628.0
+          "precision": 0.9856216780825933,
+          "recall": 0.9856514252917543,
+          "f1-score": 0.9855356443938654,
+          "support": 5227.0
         }
       },
       "confusion_matrix": [
         [
-          2107,
-          176,
-          129,
-          24
+          5008,
+          27,
+          0,
+          0
         ],
         [
-          9,
-          133,
-          7,
-          43
+          45,
+          144,
+          3,
+          0
         ],
         [
           0,
@@ -169,16 +176,16 @@
       ],
       "confusion_matrix_normalized": [
         [
-          0.8649425287356322,
-          0.0722495894909688,
-          0.05295566502463054,
-          0.009852216748768473
+          0.9946375372393247,
+          0.005362462760675273,
+          0.0,
+          0.0
         ],
         [
-          0.046875,
-          0.6927083333333334,
-          0.036458333333333336,
-          0.22395833333333334
+          0.234375,
+          0.75,
+          0.015625,
+          0.0
         ],
         [
           0.0,
@@ -208,37 +215,37 @@
     },
     "prediction_interval": {
       "available": true,
-      "coverage_90": 0.932648401826484,
-      "mean_width": 9.97615056332827,
-      "p25_width": 3.6677572615009453,
-      "p75_width": 14.230897153339374,
-      "width_ratio": 3.8799997215507402,
-      "pinball_q05": 0.26104922954229204,
-      "pinball_q95": 0.2738405070626848
+      "coverage_90": 0.9414578151903578,
+      "mean_width": 4.524182121254016,
+      "p25_width": 3.2777413972789553,
+      "p75_width": 5.450444653128244,
+      "width_ratio": 1.6628659776677246,
+      "pinball_q05": 0.1234437512699308,
+      "pinball_q95": 0.13065016859515194
     },
     "runtime": {
-      "feature_rows": 2628,
-      "train_seconds": 156.60317509999732,
-      "eval_seconds": 0.013291299997945316
+      "feature_rows": 5227,
+      "train_seconds": 443.6414274999988,
+      "eval_seconds": 0.010502400000405032
     },
     "split": {
       "horizon_h": 6,
       "row_counts": {
-        "train": 12259,
-        "val": 2627,
-        "test": 2628
+        "train": 24389,
+        "val": 5226,
+        "test": 5227
       },
       "date_ranges": {
         "train": {
-          "start": "2023-05-02 00:00:00+00:00",
-          "end": "2024-09-23 18:00:00+00:00"
+          "start": "2021-05-10 00:00:00+00:00",
+          "end": "2024-02-20 04:00:00+00:00"
         },
         "val": {
-          "start": "2024-09-23 19:00:00+00:00",
-          "end": "2025-01-11 05:00:00+00:00"
+          "start": "2024-02-20 05:00:00+00:00",
+          "end": "2024-09-24 22:00:00+00:00"
         },
         "test": {
-          "start": "2025-01-11 06:00:00+00:00",
+          "start": "2024-09-24 23:00:00+00:00",
           "end": "2025-04-30 17:00:00+00:00"
         }
       },
