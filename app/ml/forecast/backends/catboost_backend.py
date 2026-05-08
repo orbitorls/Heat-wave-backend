@@ -118,9 +118,9 @@ class CatBoostForecaster:
         weights_train = _make_sample_weight(y_train.to_numpy(dtype=float))
 
         common_params = dict(
-            iterations=2000,
-            learning_rate=0.03,
-            depth=8,
+            iterations=1500,
+            learning_rate=0.05,
+            depth=6,
             l2_leaf_reg=3,
             od_type="Iter",
             od_wait=50,

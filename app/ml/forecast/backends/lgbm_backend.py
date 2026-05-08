@@ -331,6 +331,22 @@ def _build_monotone_constraints(feature_list: list[str]) -> list[int]:
     return [1 if any(col.startswith(p) for p in WARM_PREFIXES) else 0 for col in feature_list]
 
 
+def _add_monotone_constraints_if_supported(params: dict, feature_list: list[str]) -> dict:
+    """Return params with monotone constraints only for LightGBM objectives that support them."""
+    constrained = dict(params)
+    objective = str(constrained.get("objective", "")).strip().lower()
+    if objective == "quantile":
+        constrained.pop("monotone_constraints", None)
+        return constrained
+
+    constraints = _build_monotone_constraints(feature_list)
+    if any(c != 0 for c in constraints):
+        constrained["monotone_constraints"] = constraints
+    else:
+        constrained.pop("monotone_constraints", None)
+    return constrained
+
+
 def _refit_single_booster(
     target: str,
     alpha: float,
@@ -352,7 +368,7 @@ def _refit_single_booster(
         "alpha": alpha,
         "seed": seed,
     }
-    # LightGBM rejects monotone_constraints with objective="quantile" (upstream limit).
+    params = _add_monotone_constraints_if_supported(params, list(X_tv.columns))
     dtrain = lgb.Dataset(X_tv, label=y_tv_target, weight=weights_tv)
     return lgb.train(params, dtrain, num_boost_round=best_iter)
 
@@ -508,7 +524,7 @@ class LGBMForecaster:
                             "alpha": alpha,
                             "seed": seed,
                         }
-                        # LightGBM rejects monotone_constraints with objective="quantile".
+                        params = _add_monotone_constraints_if_supported(params, list(X_tv.columns))
                         booster = lgb.train(
                             params,
                             lgb.Dataset(X_tv, label=y_tv[target].values, weight=weights_tv),
@@ -625,7 +641,7 @@ class LGBMForecaster:
                 **_DEFAULT_PARAMS,
                 **_lgbm_device_params(dev),
                 "alpha": 0.50,
-                "num_leaves": trial.suggest_int("num_leaves", 31, 255),
+                "num_leaves": trial.suggest_int("num_leaves", 64, 256),
                 "max_depth": trial.suggest_int("max_depth", 4, 12),
                 "max_bin": _effective_bin,
                 "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
@@ -697,8 +713,8 @@ class LGBMForecaster:
             study = optuna.create_study(
                 study_name=study_name,
                 direction="minimize",
-                sampler=optuna.samplers.TPESampler(seed=self.random_state),
-                pruner=optuna.pruners.HyperbandPruner(min_resource=10, max_resource=1000, reduction_factor=3),
+                sampler=optuna.samplers.TPESampler(seed=self.random_state, n_startup_trials=20),
+                pruner=optuna.pruners.SuccessiveHalvingPruner(min_resource=20, reduction_factor=2),
                 storage=_storage,
                 load_if_exists=True,
             )
@@ -706,8 +722,8 @@ class LGBMForecaster:
             logger.warning("Optuna persistent storage unavailable (%s). Falling back to in-memory study.", exc)
             study = optuna.create_study(
                 direction="minimize",
-                sampler=optuna.samplers.TPESampler(seed=self.random_state),
-                pruner=optuna.pruners.HyperbandPruner(min_resource=10, max_resource=1000, reduction_factor=3),
+                sampler=optuna.samplers.TPESampler(seed=self.random_state, n_startup_trials=20),
+                pruner=optuna.pruners.SuccessiveHalvingPruner(min_resource=20, reduction_factor=2),
             )
         run_id = os.environ.get("HEATSHIELD_RUN_ID")
         slot = f"{self._station_id}:h{self._horizon_h}"
@@ -1063,7 +1079,7 @@ class LGBMDirectHIForecaster:
                     "alpha": alpha,
                     "seed": seed,
                 }
-                # LightGBM rejects monotone_constraints with objective="quantile".
+                params = _add_monotone_constraints_if_supported(params, list(X_tv.columns))
                 booster = lgb.train(
                     params,
                     lgb.Dataset(X_tv, label=y_tv.to_numpy(dtype=float), weight=weights_tv),
@@ -1126,7 +1142,7 @@ class LGBMDirectHIForecaster:
                 **_DEFAULT_PARAMS,
                 **_lgbm_device_params(dev),
                 "alpha": 0.50,
-                "num_leaves": trial.suggest_int("num_leaves", 31, 255),
+                "num_leaves": trial.suggest_int("num_leaves", 64, 256),
                 "max_depth": trial.suggest_int("max_depth", 4, 12),
                 "max_bin": _effective_bin,
                 "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
@@ -1188,8 +1204,8 @@ class LGBMDirectHIForecaster:
             study = optuna.create_study(
                 study_name=study_name,
                 direction="minimize",
-                sampler=optuna.samplers.TPESampler(seed=self.random_state),
-                pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0),
+                sampler=optuna.samplers.TPESampler(seed=self.random_state, n_startup_trials=20),
+                pruner=optuna.pruners.SuccessiveHalvingPruner(min_resource=20, reduction_factor=2),
                 storage=_storage,
                 load_if_exists=True,
             )
@@ -1197,8 +1213,8 @@ class LGBMDirectHIForecaster:
             logger.warning("Optuna persistent storage unavailable (%s). Falling back to in-memory study.", exc)
             study = optuna.create_study(
                 direction="minimize",
-                sampler=optuna.samplers.TPESampler(seed=self.random_state),
-                pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0),
+                sampler=optuna.samplers.TPESampler(seed=self.random_state, n_startup_trials=20),
+                pruner=optuna.pruners.SuccessiveHalvingPruner(min_resource=20, reduction_factor=2),
             )
         run_id = os.environ.get("HEATSHIELD_RUN_ID")
         slot = f"{self._station_id}:h{self._horizon_h}"
