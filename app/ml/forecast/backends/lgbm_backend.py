@@ -142,6 +142,14 @@ def _lgbm_device_params(device: str, parallel_jobs: int = 1) -> dict:
     return params
 
 
+def _sanitize_lgbm_params_for_device(params: dict, device: str) -> dict:
+    """Return LightGBM params adjusted for known device constraints."""
+    sanitized = dict(params)
+    if device.lower().strip() == "gpu" and int(sanitized.get("max_bin", 0) or 0) > 255:
+        sanitized["max_bin"] = 255
+    return sanitized
+
+
 def _remaining_trials(study, requested_trials: int) -> int:
     """Run Optuna up to requested complete trials, not requested extra trials."""
     complete = sum(t.state.name == "COMPLETE" for t in study.trials)
@@ -344,9 +352,7 @@ def _refit_single_booster(
         "alpha": alpha,
         "seed": seed,
     }
-    constraints = _build_monotone_constraints(list(X_tv.columns))
-    if any(c != 0 for c in constraints):
-        params["monotone_constraints"] = constraints
+    # LightGBM rejects monotone_constraints with objective="quantile" (upstream limit).
     dtrain = lgb.Dataset(X_tv, label=y_tv_target, weight=weights_tv)
     return lgb.train(params, dtrain, num_boost_round=best_iter)
 
@@ -502,9 +508,7 @@ class LGBMForecaster:
                             "alpha": alpha,
                             "seed": seed,
                         }
-                        constraints = _build_monotone_constraints(list(X_tv.columns))
-                        if any(c != 0 for c in constraints):
-                            params["monotone_constraints"] = constraints
+                        # LightGBM rejects monotone_constraints with objective="quantile".
                         booster = lgb.train(
                             params,
                             lgb.Dataset(X_tv, label=y_tv[target].values, weight=weights_tv),
@@ -721,10 +725,11 @@ class LGBMForecaster:
             study.optimize(objective, n_trials=remaining_trials, show_progress_bar=False, callbacks=[_heartbeat_cb])
         else:
             logger.info("Optuna study already has %d complete trials; reusing best params", self.n_trials)
-        logger.info("Optuna best: MAE=%.4f params=%s", study.best_value, study.best_params)
+        best_params = _sanitize_lgbm_params_for_device(study.best_params, dev)
+        logger.info("Optuna best: MAE=%.4f params=%s", study.best_value, best_params)
         self._metadata["n_trials_completed"] = sum(t.state.name == "COMPLETE" for t in study.trials)
         self._metadata["n_trials_pruned"] = sum(t.state.name == "PRUNED" for t in study.trials)
-        return study.best_params
+        return best_params
 
     # ------------------------------------------------------------------
     # Inference helpers
@@ -1058,9 +1063,7 @@ class LGBMDirectHIForecaster:
                     "alpha": alpha,
                     "seed": seed,
                 }
-                constraints = _build_monotone_constraints(list(X_tv.columns))
-                if any(c != 0 for c in constraints):
-                    params["monotone_constraints"] = constraints
+                # LightGBM rejects monotone_constraints with objective="quantile".
                 booster = lgb.train(
                     params,
                     lgb.Dataset(X_tv, label=y_tv.to_numpy(dtype=float), weight=weights_tv),
@@ -1213,9 +1216,10 @@ class LGBMDirectHIForecaster:
             study.optimize(objective, n_trials=remaining_trials, show_progress_bar=False, callbacks=[_heartbeat_cb])
         else:
             logger.info("Optuna study already has %d complete trials; reusing best params", self.n_trials)
+        best_params = _sanitize_lgbm_params_for_device(study.best_params, _dev_for_name)
         self._metadata["n_trials_completed"] = sum(t.state.name == "COMPLETE" for t in study.trials)
         self._metadata["n_trials_pruned"] = sum(t.state.name == "PRUNED" for t in study.trials)
-        return study.best_params
+        return best_params
 
     def _align(self, X: pd.DataFrame) -> pd.DataFrame:
         out = X.reindex(columns=self.feature_list)
