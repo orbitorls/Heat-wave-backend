@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 _QUANTILES = [0.05, 0.50, 0.95, 0.97]
 _TARGETS = ["temp_c", "rh"]
-_SEEDS = [42, 123, 7]
+_SEEDS = [42, 123, 7]          # ensemble seeds for median (q50) — needs 3 for stability
+_SEEDS_TAIL = [42]             # single seed for tail quantiles (q05/q95/q97) — sufficient
 _CV_SPLITS = 3
 _CV_GAP_HOURS = 72
 _LGBM_DEVICE_SUPPORT: dict[str, bool] = {}
@@ -38,34 +39,71 @@ _HW_DEVICE: str | None = None
 
 # Detect best LightGBM device.
 # Hardware probe runs once at import; env overrides are re-read on every call.
-# Priority: LGBM_DEVICE env > HEATSHIELD_FORCE_CPU env > CUDA > OpenCL GPU > CPU
+# Priority: LGBM_DEVICE env > HEATSHIELD_FORCE_CPU env > CUDA > benchmark(GPU vs CPU)
+
+def _benchmark_device(device: str, n_rows: int = 30_000, n_cols: int = 50, rounds: int = 100) -> float:
+    """Return seconds to train one booster on synthetic data of representative size."""
+    import time
+    import lightgbm as lgb
+    rng = np.random.default_rng(0)
+    X_bench = rng.standard_normal((n_rows, n_cols)).astype(np.float32)
+    y_bench = rng.standard_normal(n_rows).astype(np.float32)
+    t0 = time.perf_counter()
+    lgb.train(
+        {"objective": "regression", "device_type": device, "verbose": -1,
+         "num_leaves": 64, "n_jobs": -1 if device == "cpu" else 1},
+        lgb.Dataset(X_bench, y_bench),
+        num_boost_round=rounds,
+    )
+    return time.perf_counter() - t0
+
 
 def _probe_lgbm_hardware() -> str:
-    """Run the slow lgb.train probes once to discover hardware capabilities."""
+    """Probe available devices; benchmark GPU vs CPU and choose the faster one."""
     import lightgbm as lgb
-    # Each probe gets a fresh Dataset — reusing one Dataset across probes risks
-    # hitting inconsistent internal state after a failed lgb.train call.
+
+    # CUDA is always faster than CPU for any meaningful workload — skip benchmark.
     try:
         lgb.train({"objective": "regression", "device_type": "cuda", "verbose": -1,
                    "num_leaves": 4},
                   lgb.Dataset(np.zeros((4, 2)), np.zeros(4)),
                   num_boost_round=1)
-        logger.info("LightGBM CUDA detected — training will use CUDA")
+        logger.info("LightGBM CUDA detected — using CUDA")
         _LGBM_DEVICE_SUPPORT["cuda"] = True
-        _LGBM_DEVICE_SUPPORT["gpu"] = True  # if CUDA works, OpenCL certainly does
+        _LGBM_DEVICE_SUPPORT["gpu"] = True
         return "cuda"
     except Exception:
         _LGBM_DEVICE_SUPPORT["cuda"] = False
+
+    # OpenCL GPU (T4/V100): benchmark against CPU since T4 OpenCL is often
+    # slower than multi-threaded CPU for tabular data <100k rows.
+    gpu_available = False
     try:
         lgb.train({"objective": "regression", "device_type": "gpu", "verbose": -1,
                    "num_leaves": 4},
                   lgb.Dataset(np.zeros((4, 2)), np.zeros(4)),
                   num_boost_round=1)
-        logger.info("LightGBM GPU (OpenCL) detected — training will use GPU")
         _LGBM_DEVICE_SUPPORT["gpu"] = True
-        return "gpu"
+        gpu_available = True
     except Exception:
         _LGBM_DEVICE_SUPPORT["gpu"] = False
+
+    if not gpu_available:
+        logger.info("LightGBM: no GPU detected — using CPU")
+        return "cpu"
+
+    try:
+        cpu_t = _benchmark_device("cpu")
+        gpu_t = _benchmark_device("gpu")
+        # Require GPU to be at least 15% faster to prefer it (CPU parallelises refit better).
+        if gpu_t < cpu_t * 0.85:
+            logger.info("LightGBM benchmark: GPU %.2fs < CPU %.2fs — using GPU", gpu_t, cpu_t)
+            return "gpu"
+        else:
+            logger.info("LightGBM benchmark: CPU %.2fs <= GPU %.2fs — using CPU", cpu_t, gpu_t)
+            return "cpu"
+    except Exception:
+        logger.warning("LightGBM benchmark failed; falling back to CPU")
         return "cpu"
 
 
@@ -111,6 +149,10 @@ def _detect_device() -> str:
 
 
 _DEVICE_TYPE = "auto"  # kept for external references; actual device is resolved lazily
+
+# Cross-slot warm-start: stores best Optuna params from the most recent completed slot
+# per target_kind so the next slot can enqueue them as a starting point for TPE.
+_last_best_params: dict[str, dict] = {}
 
 # Default LightGBM params (overridden by Optuna)
 _DEFAULT_PARAMS = {
@@ -513,10 +555,11 @@ class LGBMForecaster:
         weights_tv = _compute_dense_weights(y_hi_tv, alpha=dense_alpha)
 
         if is_gpu:
-            for t_idx, target in enumerate(_TARGETS):
+            for target in _TARGETS:
                 for q_idx, alpha in enumerate(_QUANTILES):
+                    seeds = _SEEDS if alpha == 0.50 else _SEEDS_TAIL
                     seed_boosters = []
-                    for seed in _SEEDS:
+                    for seed in seeds:
                         params = {
                             **_DEFAULT_PARAMS,
                             **self._best_params,
@@ -532,14 +575,14 @@ class LGBMForecaster:
                         )
                         seed_boosters.append(booster)
                     self._boosters[target][q_idx] = seed_boosters
-                    logger.debug("Refit booster: target=%s q=%.2f seeds=%d", target, alpha, len(_SEEDS))
+                    logger.debug("Refit booster: target=%s q=%.2f seeds=%d", target, alpha, len(seeds))
         else:
             n_jobs = max(1, min(int(os.environ.get("LGBM_PARALLEL_BOOSTERS", "3")), os.cpu_count() or 1))
             jobs = [
                 (target, q_idx, alpha, seed)
-                for t_idx, target in enumerate(_TARGETS)
+                for target in _TARGETS
                 for q_idx, alpha in enumerate(_QUANTILES)
-                for seed in _SEEDS
+                for seed in (_SEEDS if alpha == 0.50 else _SEEDS_TAIL)
             ]
             results = Parallel(n_jobs=n_jobs, backend="loky")(
                 delayed(_refit_single_booster)(
@@ -551,14 +594,15 @@ class LGBMForecaster:
                 for target, q_idx, alpha, seed in jobs
             )
             result_idx = 0
-            for t_idx, target in enumerate(_TARGETS):
+            for target in _TARGETS:
                 for q_idx, alpha in enumerate(_QUANTILES):
+                    seeds = _SEEDS if alpha == 0.50 else _SEEDS_TAIL
                     seed_boosters = []
-                    for seed in _SEEDS:
+                    for _ in seeds:
                         seed_boosters.append(results[result_idx])
                         result_idx += 1
                     self._boosters[target][q_idx] = seed_boosters
-                    logger.debug("Refit booster: target=%s q=%.2f seeds=%d", target, alpha, len(_SEEDS))
+                    logger.debug("Refit booster: target=%s q=%.2f seeds=%d", target, alpha, len(seeds))
 
         # Danger gate: fit on train+val_es, sweep thresholds on val_cal.
         y_hi_tv_series = pd.Series(y_hi_tv, index=X_tv.index)
@@ -674,10 +718,11 @@ class LGBMForecaster:
                     weights = _compute_dense_weights(y_hi_for_weights[tr_idx], alpha=dense_alpha)
                 dtrain = lgb.Dataset(X_train, label=y_train, weight=weights)
                 dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
+                _trial_rounds = int(os.environ.get("LGBM_TUNE_ROUNDS", "300"))
                 booster = lgb.train(
                     params,
                     dtrain,
-                    num_boost_round=500,
+                    num_boost_round=_trial_rounds,
                     valid_sets=[dval],
                     callbacks=[lgb.early_stopping(20, verbose=False), lgb.log_evaluation(-1)],
                 )
@@ -738,6 +783,16 @@ class LGBMForecaster:
 
         remaining_trials = _remaining_trials(study, self.n_trials)
         if remaining_trials > 0:
+            # Warm-start: enqueue best params from the previous slot so TPE has
+            # a good starting point without burning random startup trials.
+            seed_params = _last_best_params.get(self.target_kind)
+            completed_count = sum(t.state.name == "COMPLETE" for t in study.trials)
+            if seed_params and completed_count == 0:
+                try:
+                    study.enqueue_trial(seed_params)
+                    logger.debug("Warm-start: enqueued previous slot's best params for %s", self.target_kind)
+                except Exception:
+                    pass  # enqueue_trial can reject params that violate the search space
             study.optimize(objective, n_trials=remaining_trials, show_progress_bar=False, callbacks=[_heartbeat_cb])
         else:
             logger.info("Optuna study already has %d complete trials; reusing best params", self.n_trials)
@@ -745,6 +800,8 @@ class LGBMForecaster:
         logger.info("Optuna best: MAE=%.4f params=%s", study.best_value, best_params)
         self._metadata["n_trials_completed"] = sum(t.state.name == "COMPLETE" for t in study.trials)
         self._metadata["n_trials_pruned"] = sum(t.state.name == "PRUNED" for t in study.trials)
+        # Store for next slot's warm-start (module-level; works when running single-process)
+        _last_best_params[self.target_kind] = {k: v for k, v in study.best_params.items()}
         return best_params
 
     # ------------------------------------------------------------------
@@ -903,10 +960,10 @@ class LGBMForecaster:
         dir_path = Path(dir_path)
         dir_path.mkdir(parents=True, exist_ok=True)
 
-        # Change 3f: iterates _QUANTILES — auto-handles 4 quantiles now
         for target in _TARGETS:
             for q_idx, alpha in enumerate(_QUANTILES):
-                for s_idx, seed in enumerate(_SEEDS):
+                seeds = _SEEDS if alpha == 0.50 else _SEEDS_TAIL
+                for s_idx, seed in enumerate(seeds):
                     fname = f"{target}_q{int(alpha*100):02d}_s{seed}.txt"
                     booster = self._boosters[target][q_idx][s_idx]
                     if booster is not None:
@@ -954,11 +1011,10 @@ class LGBMForecaster:
                          if k not in ("feature_list", "feature_medians", "best_params",
                                       "backend_name", "target_kind", "station_id", "horizon_h")}
 
-        # Change 3f: load iterates _QUANTILES — handles q97 automatically
         for target in _TARGETS:
             for q_idx, alpha in enumerate(_QUANTILES):
                 seed_boosters = []
-                for seed in _SEEDS:
+                for seed in _SEEDS:  # load any seed that was saved (resilient to fan-out changes)
                     fname = dir_path / f"{target}_q{int(alpha*100):02d}_s{seed}.txt"
                     if fname.exists():
                         seed_boosters.append(lgb.Booster(model_file=str(fname)))
@@ -1070,8 +1126,9 @@ class LGBMDirectHIForecaster:
 
         quantile_map = {"q05": 0.05, "q50": 0.50, "q95": 0.95, "q97": 0.97}
         for role, alpha in quantile_map.items():
+            seeds = _SEEDS if alpha == 0.50 else _SEEDS_TAIL
             seed_boosters = []
-            for seed in _SEEDS:
+            for seed in seeds:
                 params = {
                     **_DEFAULT_PARAMS,
                     **self._best_params,

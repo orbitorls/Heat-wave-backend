@@ -5,8 +5,9 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.api import heat_index, events, risk, whatif, action_card, forecast
+from app.api import heat_index, events, events_auto, risk, whatif, action_card, forecast, stations, profiles
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +51,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "https://heatshield.app",
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+app.include_router(stations.router, prefix="/stations", tags=["Stations"])
+app.include_router(profiles.router, prefix="/profiles", tags=["Profiles"])
 app.include_router(heat_index.router, prefix="/heat-index", tags=["Heat Index"])
 app.include_router(events.router, prefix="/events", tags=["Heatwave Events"])
+app.include_router(events_auto.router, prefix="/events", tags=["Heatwave Events"])
 app.include_router(risk.router, prefix="/risk", tags=["Risk Scoring"])
 app.include_router(whatif.router, prefix="/whatif", tags=["What-if Simulator"])
 app.include_router(action_card.router, prefix="/action-card", tags=["Action Card"])

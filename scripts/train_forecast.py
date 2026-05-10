@@ -944,5 +944,15 @@ def main() -> None:
         )
 
 
+def run(argv: list[str]) -> None:
+    """Call main() with explicit argv — allows notebook to avoid subprocess overhead."""
+    _saved = sys.argv[:]
+    sys.argv = ["train_forecast"] + list(argv)
+    try:
+        main()
+    finally:
+        sys.argv = _saved
+
+
 if __name__ == "__main__":
     main()
