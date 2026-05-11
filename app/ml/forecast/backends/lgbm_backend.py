@@ -854,7 +854,14 @@ class LGBMForecaster:
                     logger.debug("Warm-start: enqueued previous slot's best params for %s", self.target_kind)
                 except Exception:
                     pass  # enqueue_trial can reject params that violate the search space
-            study.optimize(objective, n_trials=remaining_trials, show_progress_bar=False, callbacks=[_heartbeat_cb])
+            # Timeout: 5 minutes max per horizon tuning session to prevent runaway trials
+            study.optimize(
+                objective,
+                n_trials=remaining_trials,
+                show_progress_bar=False,
+                callbacks=[_heartbeat_cb],
+                timeout=300,
+            )
         else:
             logger.info("Optuna study already has %d complete trials; reusing best params", self.n_trials)
         best_params = _sanitize_lgbm_params_for_device(study.best_params, dev)

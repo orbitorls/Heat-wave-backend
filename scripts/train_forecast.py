@@ -758,7 +758,7 @@ def main() -> None:
                     write_heartbeat(run_id, current_slot=current_slot, phase="slot_done")
                     logger.info("Saved %s v3: station=%s h=%d", backend_name, sid, h)
                     del forecaster, bundle, split
-                    gc.collect()
+                    # gc.collect() removed - let Python's generational GC handle it
 
                 # Optional CatBoost training when --backends includes "catboost".
                 # Trained head-to-head against the LGBM champion; the better backend wins
@@ -862,7 +862,7 @@ def main() -> None:
                         _record_leaderboard_row(cb_row)
                         logger.info("CatBoost v3 training done: station=%s h=%d", sid, h)
                         del cb_forecaster, cb_bundle, cb_split, y_cb
-                        gc.collect()
+                        # gc.collect() removed - let Python's generational GC handle it
                     except Exception as exc:
                         logger.warning("CatBoost training failed (%s) — skipping", exc)
             return rows
@@ -978,7 +978,7 @@ def main() -> None:
         }
         _record_leaderboard_row(row)
         write_heartbeat(run_id, current_slot=f"all:h{horizon_h}", phase="slot_done")
-        gc.collect()
+        # gc.collect() removed - let Python's generational GC handle it
 
     logger.info("=" * 50)
 

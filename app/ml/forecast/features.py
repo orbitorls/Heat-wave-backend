@@ -387,10 +387,23 @@ def build_X_once(
     evening_mask = ((local_hour_num >= 16) & (local_hour_num <= 20)).astype(float)
     _temp_x_evening = _tc_lag1 * evening_mask
 
+    # Additional physics-based interaction features
+    _rh_lag1 = station_group["rh"].shift(1)
+    _vpd_lag1 = station_group["vpd_kpa"].shift(1) if "vpd_kpa" in df.columns else None
+    _dewpoint_lag1 = station_group["dewpoint_c"].shift(1) if "dewpoint_c" in df.columns else None
+    _hi_lag1 = station_group["heat_index_c"].shift(1)
+    
     _interaction_cols = {
         "temp_range_24h": _temp_range_24h,
         "temp_x_rh": _temp_x_rh,
         "temp_x_evening": _temp_x_evening,
+        # New physics-based interactions
+        "temp_x_vpd": _tc_lag1 * _vpd_lag1 if _vpd_lag1 is not None else 0,
+        "hi_x_rh": _hi_lag1 * _rh_lag1,
+        "temp_x_dewpoint": _tc_lag1 * _dewpoint_lag1 if _dewpoint_lag1 is not None else 0,
+        # Temporal interactions for diurnal and seasonal patterns
+        "hour_x_temp": _hour_sin * _tc_lag1,
+        "doy_x_temp": _doy_sin * _tc_lag1,
     }
     df = pd.concat([df, pd.DataFrame(_interaction_cols, index=df.index)], axis=1)
 
