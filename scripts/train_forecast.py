@@ -160,11 +160,12 @@ def _oversample_danger_rows(
         y_dup = y_dup + rng.normal(0, noise_std * 0.5, len(y_dup))
     y_hi_dup = y_hi_dup + rng.normal(0, noise_std * 0.5, len(y_hi_dup))
 
-    X_out = pd.concat([X.reset_index(drop=True), X_dup], ignore_index=True)
+    # Use copy() to avoid attrs comparison issues during concat
+    X_out = pd.concat([X.reset_index(drop=True).copy(), X_dup.copy()], ignore_index=True)
     if isinstance(y, pd.DataFrame):
-        y_out = pd.concat([y.reset_index(drop=True), y_dup], ignore_index=True)
+        y_out = pd.concat([y.reset_index(drop=True).copy(), y_dup.copy()], ignore_index=True)
     else:
-        y_out = pd.concat([pd.Series(y).reset_index(drop=True), y_dup], ignore_index=True)
+        y_out = pd.concat([pd.Series(y).reset_index(drop=True).copy(), y_dup.copy()], ignore_index=True)
     y_hi_out = np.concatenate([y_hi, y_hi_dup])
     return X_out, y_out, y_hi_out
 
