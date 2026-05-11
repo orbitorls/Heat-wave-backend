@@ -570,7 +570,7 @@ class LGBMForecaster:
         dense_alpha = float(self._best_params.pop("dense_alpha", dense_alpha_init))
         self._metadata["dense_alpha"] = dense_alpha
         del X_tune, y_temp_tune, y_rh_tune, y_hi_tune, dense_weights
-        gc.collect()
+        # gc.collect() removed - let Python's generational GC handle it
 
         y_hi_train = _compute_hi_array(y_train["temp_c"].values, y_train["rh"].values)
         weights_train = _compute_combined_weights(
@@ -600,12 +600,11 @@ class LGBMForecaster:
         best_iter = max(pilot_booster.best_iteration, 1)
         logger.info("Pilot early-stop: best_iter=%d", best_iter)
         del pilot_booster
-        gc.collect()
 
         # Phase 2: refit ALL boosters on train+val_es at best_iter (no early-stop).
         X_tv = pd.concat([X_train, X_val_es], ignore_index=True)
         y_tv = pd.concat([y_train, y_val_es], ignore_index=True)
-        y_hi_tv = _compute_hi_array(y_tv["temp_c"].values, y_tv["rh"].values)
+        y_hi_tv = _compute_hi_array(y_tv["heat_index_c"].values, y_tv["rh"].values)
         weights_tv = _compute_combined_weights(
             y_hi_tv, dense_alpha=dense_alpha,
             danger_alpha=_danger_alpha_for_horizon(horizon_h),
@@ -1179,7 +1178,7 @@ class LGBMDirectHIForecaster:
         best_iter = max(pilot_booster.best_iteration, 1)
         logger.info("DirectHI pilot early-stop: best_iter=%d", best_iter)
         del pilot_booster
-        gc.collect()
+        # gc.collect() removed - let Python's generational GC handle it
 
         # Phase 2: refit ALL boosters on train+val_es at best_iter (no early-stop).
         X_tv = pd.concat([X_train, X_val_es], ignore_index=True)
