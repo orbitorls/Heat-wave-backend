@@ -29,18 +29,33 @@ def write_observations(obs: list[StationObservation], station_id: str, day: date
     return path
 
 
+# Columns needed for feature engineering - prune others for faster I/O
+_ESSENTIAL_COLUMNS = [
+    "ts_utc", "station_id", "temp_c", "rh", "source",
+    # Optional but commonly used
+    "dewpoint_c", "solar_wm2", "wind_ms", "cloud_pct", "pressure_hpa",
+]
+
+
 def read_observations(
     station_id: str,
     start: date,
     end: date,
+    columns: list[str] | None = None,
 ) -> pd.DataFrame:
     """Read all parquet partitions for a station between start and end (inclusive).
 
+    Args:
+        columns: If provided, only load these columns (faster I/O, less memory)
+    
     Returns DataFrame with columns matching StationObservation fields.
     Returns empty DataFrame if no data found.
     """
     if not _RAW_ROOT.exists():
         return pd.DataFrame()
+
+    # Use essential columns if not specified
+    _cols = columns or _ESSENTIAL_COLUMNS
 
     try:
         dataset = ds.dataset(_RAW_ROOT, format="parquet", partitioning="hive")
@@ -49,7 +64,7 @@ def read_observations(
             & (ds.field("date") >= start.isoformat())
             & (ds.field("date") <= end.isoformat())
         )
-        table = dataset.to_table(filter=filt)
+        table = dataset.to_table(filter=filt, columns=_cols)
         if table.num_rows == 0:
             return pd.DataFrame()
         df = table.to_pandas()
@@ -65,7 +80,8 @@ def read_observations(
             except ValueError:
                 continue
             if start <= day <= end:
-                frames.append(pd.read_parquet(path, engine="pyarrow"))
+                # Use columns parameter for faster I/O in fallback path too
+                frames.append(pd.read_parquet(path, engine="pyarrow", columns=_cols))
 
         frames = [f for f in frames if not f.empty]
         if not frames:
