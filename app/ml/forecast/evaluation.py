@@ -65,8 +65,12 @@ def _station_names(X: pd.DataFrame, labels: Mapping[int, str] | None) -> pd.Seri
     return codes.map(lambda c: f"station_{int(c)}")
 
 
-def _baseline_metrics(y_true: np.ndarray, X: pd.DataFrame) -> dict:
-    if "heat_index_c_lag1h" in X.columns:
+def _baseline_metrics(y_true: np.ndarray, X: pd.DataFrame, horizon_h: int = 1) -> dict:
+    # Use horizon-matched lag for persistence baseline (fairer comparison for h48/h72)
+    lag_col = f"heat_index_c_lag{horizon_h}h"
+    if lag_col in X.columns:
+        persistence = X[lag_col].to_numpy(dtype=float)
+    elif "heat_index_c_lag1h" in X.columns:
         persistence = X["heat_index_c_lag1h"].to_numpy(dtype=float)
     else:
         persistence = np.roll(y_true, 1)
@@ -106,7 +110,7 @@ def compute_metrics(
     y_pred = np.asarray(y_pred, dtype=float)
     residual = y_pred - y_true
     abs_err = np.abs(residual)
-    baselines = _baseline_metrics(y_true, X)
+    baselines = _baseline_metrics(y_true, X, horizon_h=horizon_h)
     best_baseline = min(baselines["persistence_mae"], baselines["climatology_mae"])
 
     true_cat = categorize_heat_index(y_true)
