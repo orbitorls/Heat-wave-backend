@@ -13,20 +13,121 @@ import pandas as pd
 from app.data.stations import STATIONS
 
 
-_DEFAULT_LAGS_H = [1, 3, 6, 12, 24, 48, 72, 168]
-_DEFAULT_ROLLING_H = [3, 6, 24]
+# Extended lags/rolling for long-horizon (h48/h72) support.
+# Models for short horizons can learn to ignore irrelevant long lags.
+_DEFAULT_LAGS_H = [1, 3, 6, 12, 24, 48, 72, 96, 120, 168]
+_DEFAULT_ROLLING_H = [3, 6, 24, 48, 72, 168]
+
+# Per-horizon lag/rolling selection — reduces noise for short horizons,
+# increases context for long horizons.
+_LAGS_BY_HORIZON: dict[int, list[int]] = {
+    6:   [1, 2, 3, 6, 12, 24],
+    12:  [1, 3, 6, 12, 24, 48],
+    24:  [1, 6, 12, 24, 48, 72],
+    48:  [6, 12, 24, 48, 72, 120, 168],
+    72:  [12, 24, 48, 72, 96, 120, 168, 240],
+}
+_ROLLING_BY_HORIZON: dict[int, list[int]] = {
+    6:   [3, 6, 12, 24],
+    12:  [3, 6, 12, 24, 48],
+    24:  [6, 12, 24, 48, 72],
+    48:  [12, 24, 48, 72, 168],
+    72:  [24, 48, 72, 168, 240],
+}
+
+
+def _get_lags_for_horizon(horizon_h: int, explicit: list[int] | None = None) -> list[int]:
+    """Return lag list: explicit if provided, else horizon-aware default."""
+    if explicit is not None:
+        return explicit
+    return _LAGS_BY_HORIZON.get(horizon_h, _DEFAULT_LAGS_H)
+
+
+def _get_rolling_for_horizon(horizon_h: int, explicit: list[int] | None = None) -> list[int]:
+    """Return rolling window list: explicit if provided, else horizon-aware default."""
+    if explicit is not None:
+        return explicit
+    return _ROLLING_BY_HORIZON.get(horizon_h, _DEFAULT_ROLLING_H)
+
+
+def _subset_features_for_horizon(
+    X: pd.DataFrame,
+    y: pd.DataFrame | pd.Series,
+    horizon_h: int,
+    lags_h: list[int],
+    rolling_h: list[int],
+) -> tuple[pd.DataFrame, pd.DataFrame | pd.Series]:
+    """Subset X to only lag/rolling columns relevant to the given horizon.
+
+    When building features with max horizon lags (h72), we get all possible
+    lag/rolling columns. For shorter horizons, we only need a subset of these
+    columns to avoid noise and improve model focus.
+
+    Args:
+        X: Full feature matrix built with max horizon lags
+        y: Target values
+        horizon_h: Forecast horizon
+        lags_h: Lag steps to keep for this horizon
+        rolling_h: Rolling windows to keep for this horizon
+
+    Returns:
+        (X_subset, y) where X_subset contains only relevant lag/rolling columns
+    """
+    # Always keep non-lag/rolling columns (temporal, geometry, physics features)
+    lag_rolling_cols = []
+    for lag in lags_h:
+        lag_rolling_cols.extend([f"{col}_lag{lag}h" for col in 
+            ["heat_index_c", "temp_c", "rh", "dewpoint_c", "wbgt_stull_c", "vpd_kpa"]])
+    for w in rolling_h:
+        lag_rolling_cols.extend([f"{col}_roll{w}h_mean" for col in
+            ["heat_index_c", "temp_c", "rh", "dewpoint_c"]])
+        lag_rolling_cols.extend([f"{col}_roll{w}h_std" for col in
+            ["heat_index_c", "temp_c", "rh", "dewpoint_c"]])
+    
+    # Keep core features + relevant lag/rolling columns
+    core_features = [
+        "hour_sin", "hour_cos", "doy_sin", "doy_cos", "month", "station_enc",
+        "lat", "lon", "elevation_m",
+        # Physics features
+        "temp_c", "rh", "heat_index_c", "dewpoint_c", "wbgt_stull_c", "vpd_kpa",
+        # Solar/wind if present
+        "solar_wm2", "wind_ms", "cloud_pct", "pressure_hpa",
+        # Local hour features (needed for calibration)
+        "local_hour_sin", "local_hour_cos",
+    ]
+    
+    # Get all columns that exist in X
+    existing_cols = set(X.columns)
+    keep_cols = [c for c in core_features if c in existing_cols]
+    keep_cols.extend([c for c in lag_rolling_cols if c in existing_cols])
+    
+    # Remove duplicates while preserving order
+    keep_cols = list(dict.fromkeys(keep_cols))
+    
+    X_subset = X[keep_cols].copy()
+    return X_subset, y
 
 # 3-entry LRU feature cache — keyed by (df hash, horizon_h)
 _FEATURE_CACHE: dict = {}
 _FEATURE_CACHE_ORDER: list = []
-_FEATURE_CACHE_MAX = 3
+_FEATURE_CACHE_MAX = 10  # Increased from 3 to 10 for better cache hit rate
+
+# Cross-horizon cache for build_X_once results — keyed by df hash only.
+# Allows multiple horizons to reuse the expensive X matrix without recomputation.
+_X_ONCE_CACHE: dict = {}
+_X_ONCE_CACHE_ORDER: list = []
+_X_ONCE_CACHE_MAX = 10  # Increased from 3 to 10 for better cache hit rate
+
+
+def _df_hash(df: pd.DataFrame) -> str:
+    h = _hashlib.md5(
+        pd.util.hash_pandas_object(df, index=True).values.tobytes()
+    ).hexdigest()
+    return h
 
 
 def _feature_cache_key(df: pd.DataFrame, horizon_h: int) -> str:
-    h = _hashlib.md5(
-        pd.util.hash_pandas_object(df, index=True).values.tobytes()
-    ).hexdigest()[:16]
-    return f"{h}_{horizon_h}"
+    return f"{_df_hash(df)}_{horizon_h}"
 
 
 def add_heat_index_col(df: pd.DataFrame) -> pd.DataFrame:
@@ -53,8 +154,10 @@ def add_heat_index_col(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_X_once(
     df: pd.DataFrame,
-    lags_h: list[int] = _DEFAULT_LAGS_H,
-    rolling_h: list[int] = _DEFAULT_ROLLING_H,
+    lags_h: list[int] | None = None,
+    rolling_h: list[int] | None = None,
+    *,
+    horizon_h: int = 24,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build feature matrix X (no target) and return (X, df_augmented).
 
@@ -123,6 +226,20 @@ def build_X_once(
     _doy_sin = np.sin(2 * np.pi * _day_of_year / 365)
     _doy_cos = np.cos(2 * np.pi * _day_of_year / 365)
     _month = df["ts_utc"].dt.month
+    _month_sin = np.sin(2 * np.pi * _month / 12)
+    _month_cos = np.cos(2 * np.pi * _month / 12)
+    _weekday = df["ts_utc"].dt.weekday
+
+    # Diurnal peak offset — hours until typical peak heat per station.
+    # Computed from the data as the local hour with the highest mean HI.
+    _peak_by_station = df.groupby("station_id").apply(
+        lambda g: g.groupby((g["ts_utc"].dt.hour + 7) % 24)["heat_index_c"].mean().idxmax(),
+        include_groups=False,
+    )
+    _peak_by_station = _peak_by_station.reindex(df["station_id"]).values
+    _hours_to_peak = (_peak_by_station - local_hour) % 24
+    _peak_offset_sin = np.sin(2 * np.pi * _hours_to_peak / 24)
+    _peak_offset_cos = np.cos(2 * np.pi * _hours_to_peak / 24)
 
     # Station encoding (label encode)
     _station_enc = None
@@ -158,6 +275,11 @@ def build_X_once(
         "doy_sin": _doy_sin,
         "doy_cos": _doy_cos,
         "month": _month,
+        "month_sin": _month_sin,
+        "month_cos": _month_cos,
+        "weekday": _weekday,
+        "peak_offset_sin": _peak_offset_sin,
+        "peak_offset_cos": _peak_offset_cos,
     }
     if _station_enc is not None:
         _new_cols["station_enc"] = _station_enc
@@ -188,6 +310,25 @@ def build_X_once(
         "temp_change_3h": _tc_grp.shift(1) - _tc_grp.shift(4),
     }
     df = pd.concat([df, pd.DataFrame(_cooling_cols, index=df.index)], axis=1)
+
+    # Trend features — temperature direction (rising/falling)
+    _tc_grp = station_group["temp_c"]
+    _trend_cols = {
+        "temp_trend_6h": _tc_grp.shift(1) - _tc_grp.shift(7),
+        "temp_trend_24h": _tc_grp.shift(1) - _tc_grp.shift(25),
+    }
+    df = pd.concat([df, pd.DataFrame(_trend_cols, index=df.index)], axis=1)
+
+    # Interaction features — physics-based combinations
+    # Use lag1 values (most recent past) to avoid leakage
+    _lag1_temp = _tc_grp.shift(1)
+    _lag1_rh = station_group["rh"].shift(1)
+    _interaction_cols = {
+        "temp_rh_lag1": _lag1_temp * _lag1_rh,
+        "temp_sq_lag1": _lag1_temp ** 2,
+        "rh_sq_lag1": _lag1_rh ** 2,
+    }
+    df = pd.concat([df, pd.DataFrame(_interaction_cols, index=df.index)], axis=1)
 
     # Rolling features — on the already-shifted series to avoid leakage.
     # GroupBy.shift returns a flat Series; re-group by station_id for rolling.
@@ -437,8 +578,8 @@ def build_y_for_horizon(
 def build_features(
     df: pd.DataFrame,
     horizon_h: int,
-    lags_h: list[int] = _DEFAULT_LAGS_H,
-    rolling_h: list[int] = _DEFAULT_ROLLING_H,
+    lags_h: list[int] | None = None,
+    rolling_h: list[int] | None = None,
     target_kind: Literal["hi", "th"] = "hi",
 ) -> tuple[pd.DataFrame, pd.DataFrame | pd.Series]:
     """Build lag + rolling features for XGBoost heat-index forecast.
@@ -452,8 +593,8 @@ def build_features(
             temp_c, rh, heat_index_c (optional — computed if missing).
             Must be sorted by ts_utc, 1-hour frequency.
         horizon_h: How many hours ahead to predict.
-        lags_h: Lag steps in hours to include as features.
-        rolling_h: Rolling window sizes in hours for mean and std features.
+        lags_h: Lag steps in hours. None → horizon-aware default.
+        rolling_h: Rolling window sizes. None → horizon-aware default.
         target_kind: "hi" for heat_index_c scalar target, "th" for (temp_c, rh).
 
     Returns:
@@ -464,9 +605,10 @@ def build_features(
     df.ts_utc[i + horizon_h]. No leakage.
     """
     # F2: 3-entry LRU cache keyed by (df content hash, horizon_h).
-    # Only cache when using default lags/rolling to avoid key explosion.
-    _use_cache = (lags_h == _DEFAULT_LAGS_H and rolling_h == _DEFAULT_ROLLING_H
-                  and target_kind == "hi")
+    # Only cache when using horizon-aware defaults (no explicit override).
+    _use_cache = (lags_h is None and rolling_h is None and target_kind == "hi")
+    lags_h = _get_lags_for_horizon(horizon_h, lags_h)
+    rolling_h = _get_rolling_for_horizon(horizon_h, rolling_h)
     if _use_cache:
         _ckey = _feature_cache_key(df, horizon_h)
         if _ckey in _FEATURE_CACHE:
@@ -475,7 +617,22 @@ def build_features(
             _FEATURE_CACHE_ORDER.append(_ckey)
             return _FEATURE_CACHE[_ckey]
 
-    X, df_aug = build_X_once(df, lags_h, rolling_h)
+    # Reuse build_X_once across horizons via cross-horizon cache
+    # Cache key includes resolved lag/rolling so different horizons don't
+    # incorrectly share the same X matrix (per-horizon lags differ now).
+    _config_key = hash(tuple(lags_h) + tuple(rolling_h)) if _use_cache else None
+    _xh_key = f"{_df_hash(df)}_{_config_key}" if _use_cache else None
+    if _use_cache and _xh_key in _X_ONCE_CACHE:
+        X, df_aug = _X_ONCE_CACHE[_xh_key]
+    else:
+        X, df_aug = build_X_once(df, lags_h, rolling_h)
+        if _use_cache:
+            _X_ONCE_CACHE[_xh_key] = (X, df_aug)
+            _X_ONCE_CACHE_ORDER.append(_xh_key)
+            while len(_X_ONCE_CACHE_ORDER) > _X_ONCE_CACHE_MAX:
+                _evict = _X_ONCE_CACHE_ORDER.pop(0)
+                _X_ONCE_CACHE.pop(_evict, None)
+
     y = build_y_for_horizon(df_aug, X.index, horizon_h, target_kind)
     valid = y.notna().all(axis=1) if isinstance(y, pd.DataFrame) else y.notna()
     result = X[valid].reset_index(drop=True), y[valid].reset_index(drop=True)
@@ -492,10 +649,14 @@ def build_features(
 
 
 def get_feature_names(
-    lags_h: list[int] = _DEFAULT_LAGS_H,
-    rolling_h: list[int] = _DEFAULT_ROLLING_H,
+    lags_h: list[int] | None = None,
+    rolling_h: list[int] | None = None,
+    *,
+    horizon_h: int = 24,
 ) -> list[str]:
     """Return the expected feature column names (for validation at predict time)."""
+    lags_h = _get_lags_for_horizon(horizon_h, lags_h)
+    rolling_h = _get_rolling_for_horizon(horizon_h, rolling_h)
     names = [
         "hour_sin", "hour_cos", "doy_sin", "doy_cos", "month", "station_enc",
         # Station geometry — always present (filled with 0.0 for unknown stations)
@@ -515,6 +676,7 @@ def get_feature_names(
     # v2 features — always present regardless of extended column availability
     names += [
         "local_hour_sin", "local_hour_cos",
+        "peak_offset_sin", "peak_offset_cos",
         "hi_change_3h", "temp_change_3h",
         "temp_x_rh",
         "temp_x_evening",
